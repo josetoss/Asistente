@@ -208,7 +208,6 @@ async function getBigRock() {
   const key = 'bigrock';
   if (cache.has(key)) return cache.get(key);
   const list = (await readColumn('BigRocks'))
-                .slice(1)
                 .filter(Boolean)
                 .map(t => '• ' + t.trim());
   cache.set(key, list, 120);
