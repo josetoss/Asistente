@@ -1,11 +1,9 @@
 {
   "name": "joya-ultimate-render",
   "version": "1.0.0",
-  "description": "Asistente Joya Ultimate – Bot Telegram + Google Sheets (Render)",
+  "description": "Asistente Joya Ultimate",
   "type": "module",
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node index.js"
   },
@@ -13,14 +11,8 @@
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
     "node-fetch": "^3.3.2",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "fast-xml-parser": "^4.4.0" 
   },
-  "keywords": [
-    "telegram-bot",
-    "google-sheets",
-    "openai",
-    "gemini",
-    "render"
-  ],
   "license": "MIT"
 }
