@@ -120,14 +120,41 @@ async function addUnique(sheet, text) {
 }
 
 async function removeRow(sheet, text) {
-  const values = await col(sheet);
-  const idx    = values.findIndex(v => v?.toLowerCase() === text.toLowerCase());
-  if (idx === -1) return `ℹ️ No se encontró \"${text}\" en \"${sheet}\".`;
-  await sheetsClient().then(gs => gs.spreadsheets.batchUpdate({
-    spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-    requestBody : { requests: [{ deleteDimension: { range: { sheetId: await sheetId(sheet), dimension: 'ROWS', startIndex: idx, endIndex: idx+1 } } }] }
-  }));
-  return `🗑️ Eliminado de \"${sheet}\": ${text}`;
+  try {
+    const c = await col(sheet);
+    const idx = c.findIndex(v => v?.toLowerCase?.() === text.toLowerCase());
+
+    if (idx === -1) {
+      return `ℹ️ No se encontró "${text}" en "${sheet}".`;
+    }
+
+    // --- LA CORRECCIÓN ESTÁ AQUÍ ---
+    // 1. Obtenemos el cliente y el ID de la hoja ANTES de construir el objeto de la petición.
+    const gs = await sheetsClient();
+    const idDeLaHoja = await sheetId(sheet);
+
+    // 2. Ahora construimos el objeto usando la variable, sin 'await' adentro.
+    await gs.spreadsheets.batchUpdate({
+      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          deleteDimension: {
+            range: {
+              sheetId: idDeLaHoja, // <-- Usamos la variable
+              dimension: 'ROWS',
+              startIndex: idx,
+              endIndex: idx + 1
+            }
+          }
+        }]
+      }
+    });
+
+    return `🗑️ Eliminado de "${sheet}": ${text}`;
+  } catch (e) {
+    console.error(`Error en removeRow para "${sheet}":`, e.message);
+    return `❌ Error al intentar eliminar de "${sheet}".`;
+  }
 }
 
 /* Big Rocks */
