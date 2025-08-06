@@ -1,0 +1,12 @@
+{
+  "name": "asistente-joya",
+  "version": "1.0.0",
+  "description": "Bot de Telegram Asistente Joya",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
