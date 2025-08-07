@@ -70,15 +70,15 @@ const googleClient = singleton(async scopes => {
 const sheetsClient = singleton(async () =>
   google.sheets({ version:'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
 );
+
 const calendarClient = singleton(async () =>
   google.calendar({
     version: 'v3',
     auth: await googleClient([
-      'https://www.googleapis.com/auth/calendar.readonly',
-      'https://www.googleapis.com/auth/calendar.events',           // <- para poder insertar
-      'https://www.googleapis.com/auth/calendar.events.readonly'
+      'https://www.googleapis.com/auth/calendar', // Use this broader scope
     ])
   }));
+
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
   if (!chatId || !txt) return;
@@ -198,80 +198,91 @@ async function removeRow(sheetName, text) {
 }
 
 /* ─── Big Rocks, Intereses, Pendientes, Agenda ─────────────────── */
+
 async function getBigRocks() {
-  const key='bigRocks';
+  const key = 'bigRocks';
   if (cache.has(key)) return cache.get(key);
-  const list = (await col('BigRocks')).filter(Boolean).map(t=>'• '+t.trim());
-  cache.set(key, list, 120);
-  return list;
+  try {
+    const list = (await col('BigRocks')).filter(Boolean).map(t => '• ' + t.trim());
+    cache.set(key, list, 120);
+    return list;
+  } catch (e) {
+    console.error('getBigRocks error:', e.message);
+    return ['(Error al obtener Big Rocks)'];
+  }
 }
 
 async function getIntereses() {
-  const key='intereses';
+  const key = 'intereses';
   if (cache.has(key)) return cache.get(key);
-  const list = (await col('Intereses')).slice(1).filter(Boolean).map(t=>t.trim());
-  cache.set(key,list,600);
-  return list;
+  try {
+    const list = (await col('Intereses')).slice(1).filter(Boolean).map(t => t.trim());
+    cache.set(key, list, 600);
+    return list;
+  } catch (e) {
+    console.error('getIntereses error:', e.message);
+    return [];
+  }
 }
 
 async function getPendientes() {
-  const key='pendientes';
+  const key = 'pendientes';
   if (cache.has(key)) return cache.get(key);
-  const gs = await sheetsClient();
-  const res=await gs.spreadsheets.values.get({
-    spreadsheetId: DASHBOARD_SPREADSHEET_ID, range:'Pendientes!A2:G'
-  });
-  const rows = res.data.values||[];
-  const today = DateTime.local().startOf('day');
-  const out = rows.map(r=>({
-    tarea : r[1]||'(sin descripción)',
-    vence : r[2]?DateTime.fromJSDate(new Date(r[2])):null,
-    estado: (r[4]||'').toLowerCase(),
-    score : (Number(r[5])||2)*2 + (Number(r[6])||2)
-  }))
-  .filter(p=>!['done','discarded','waiting'].includes(p.estado))
-  .map(p=>({...p, atras: p.vence && p.vence<today}))
-  .sort((a,b)=> (b.atras-a.atras)||(b.score-a.score))
-  .slice(0,5)
-  .map(p=>`${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
-  cache.set(key,out,120);
-  return out;
+  try {
+    const gs = await sheetsClient();
+    const res = await gs.spreadsheets.values.get({
+      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
+      range: 'Pendientes!A2:G'
+    });
+    const rows = res.data.values || [];
+    const today = DateTime.local().startOf('day');
+    const out = rows.map(r => ({
+        tarea: r[1] || '(sin descripción)',
+        vence: r[2] ? DateTime.fromJSDate(new Date(r[2])) : null,
+        estado: (r[4] || '').toLowerCase(),
+        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
+      }))
+      .filter(p => !['done', 'discarded', 'waiting'].includes(p.estado))
+      .map(p => ({
+        ...p,
+        atras: p.vence && p.vence < today
+      }))
+      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
+      .slice(0, 5)
+      .map(p => `${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
+    cache.set(key, out, 120);
+    return out;
+  } catch (e) {
+    console.error('getPendientes error:', e.message);
+    return ['(Error al obtener pendientes)'];
+  }
 }
 
-// Reemplaza tu función getAgenda por esta en index.js
 async function getAgenda() {
   const cacheKey = 'agenda';
   if (cache.has(cacheKey)) return cache.get(cacheKey);
-
   try {
     const cal = await calendarClient();
-    // 1) Listar TODOS los calendarios de la cuenta
-    const { data: { items: calendars } } = await cal.calendarList.list();
-
-    // 2) Filtrar calendarios no deseados (por ejemplo, Birthdays, Tasks)
+    const {
+      data: {
+        items: calendars
+      }
+    } = await cal.calendarList.list();
     const exclude = ['birthdays', 'tasks'];
     const tz = 'America/Santiago';
     const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
-    const todayEnd   = DateTime.local().setZone(tz).endOf('day').toISO();
-
-    // 3) Para cada calendario válido, pedir sus eventos de hoy
+    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
     const eventLists = await Promise.all(
       calendars
-        .filter(c =>
-          // Incluir solo si está visible y no es automático de Google
-          c.selected !== false &&
-          !exclude.some(x => c.id.toLowerCase().includes(x))
-        )
-        .map(c => cal.events.list({
-          calendarId: c.id,
-          timeMin: todayStart,
-          timeMax: todayEnd,
-          singleEvents: true,
-          orderBy: 'startTime'
-        }))
+      .filter(c => c.selected !== false && !exclude.some(x => c.id.toLowerCase().includes(x)))
+      .map(c => cal.events.list({
+        calendarId: c.id,
+        timeMin: todayStart,
+        timeMax: todayEnd,
+        singleEvents: true,
+        orderBy: 'startTime'
+      }))
     );
-
-    // 4) Aplanar y ordenar por hora de inicio
     const allEvents = eventLists
       .flatMap(r => r.data.items || [])
       .sort((a, b) => {
@@ -279,19 +290,13 @@ async function getAgenda() {
         const tB = new Date(b.start.dateTime || b.start.date).getTime();
         return tA - tB;
       });
-
-    // 5) Formatear líneas de texto
     const lines = allEvents.map(e => {
-      const hora = e.start.dateTime
-        ? DateTime.fromISO(e.start.dateTime, { zone: tz }).toFormat('HH:mm')
-        : 'Todo el día';
-      // Incluir prefijo del calendario para distinguir orígenes
-      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary
-                    || calendars.find(c => c.id === e.calendarId)?.summary
-                    || 'Evento';
+      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, {
+        zone: tz
+      }).toFormat('HH:mm') : 'Todo el día';
+      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary || calendars.find(c => c.id === e.calendarId)?.summary || 'Evento';
       return `• [${calName}] ${hora} – ${e.summary || '(sin título)'}`;
     });
-
     cache.set(cacheKey, lines, 300);
     return lines;
   } catch (e) {
@@ -299,7 +304,6 @@ async function getAgenda() {
     return ['(Error al obtener la agenda)'];
   }
 }
-
 /* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
 async function addWorkAgendaToPersonalCalendar() {
   const key='syncAgenda';
@@ -352,25 +356,42 @@ async function addWorkAgendaToPersonalCalendar() {
     console.error('addWorkAgenda error:', e.message);
   }
 }
+/* ─── AI helpers (GPT & Gemini) ────────────────────────────────── */
 
-/* ─── OpenAI helper ────────────────────────────────────────────── */
-async function askGPT(prompt, max_tokens=300, temperature=0.6) {
-  if (!OPENAI_API_KEY) return '[OPENAI_API_KEY faltante]';
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},
-    body: JSON.stringify({
-      model:'o4-mini',
-      messages:[{role:'user',content:prompt}],
-      max_tokens, temperature
-    })
-  });
-  if (!res.ok) {
-    console.error('GPT error:', res.statusText);
-    return `[GPT error: ${res.statusText}]`;
+// Mantén tus funciones askGPT y askGemini existentes sin cambios.
+
+async function askAI(prompt, max_tokens, temperature) {
+  // Configura las promesas para llamar a ambos modelos en paralelo
+  const [responseGemini, responseGPT] = await Promise.all([
+    askGemini(prompt, max_tokens, temperature),
+    askGPT(prompt, max_tokens, temperature),
+  ]);
+
+  // Si uno de los modelos falla, simplemente usa la respuesta del otro.
+  if (responseGemini.startsWith('[Gemini error')) {
+    return `(Usando solo GPT)\n\n${responseGPT}`;
   }
-  const j = await res.json();
-  return j.choices?.[0]?.message?.content?.trim()||'[GPT vacío]';
+  if (responseGPT.startsWith('[GPT error')) {
+    return `(Usando solo Gemini)\n\n${responseGemini}`;
+  }
+
+  // Si ambos responden, usa uno de ellos para conciliar las respuestas.
+  const reconciliationPrompt = `
+    Eres un editor experto. Has recibido dos borradores para el mismo prompt. 
+    Combina las siguientes dos respuestas en una sola, concisa, y fluida. 
+    Mantén la información más relevante y el tono profesional.
+    ---
+    Respuesta 1 (Gemini):
+    ${responseGemini}
+    ---
+    Respuesta 2 (GPT):
+    ${responseGPT}
+  `;
+
+  // Usa el modelo principal (por defecto Gemini) para la conciliación.
+  const finalResponse = await askGemini(reconciliationPrompt, max_tokens, 0.5);
+
+  return finalResponse;
 }
 
 /* ─── Radar Inteligencia Global ───────────────────────────────── */
@@ -422,7 +443,7 @@ Escoge 4 titulares.
 Titulares:
 ${heads.map(h=>`${h.id}: ${h.title}`).join('\n')}
 `;
-  let out = await askGPT(prompt,700,0.7);
+  let out = await askAI(prompt,700,0.7);
   heads.forEach(h=>{
     out = out.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
   });
@@ -441,9 +462,9 @@ async function getHoroscopo() {
       ? fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra',{headers:{'X-Api-Key':NINJAS_KEY}})
           .then(r=>r.json()).then(d=>d.horoscope).catch(()=>null)
       : null,
-    askGPT('Horóscopo Libra global (3 líneas, español).',120,0.7),
-    askGPT('Horóscopo Libra carrera/finanzas (3 líneas, español).',120,0.7),
-    askGPT('Horóscopo Libra bienestar personal (3 líneas, español).',120,0.8)
+    askAI('Horóscopo Libra global (3 líneas, español).',120,0.7),
+    askAI('Horóscopo Libra carrera/finanzas (3 líneas, español).',120,0.7),
+    askAI('Horóscopo Libra bienestar personal (3 líneas, español).',120,0.8)
   ];
   const results = await Promise.allSettled(fuentes);
   const drafts = results.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value).join('\n\n');
@@ -453,7 +474,7 @@ Eres astrólogo maestro. Sintetiza estos borradores en UN solo horóscopo (titul
 
 ${drafts}
 `;
-  const final = await askGPT(prompt,250,0.6);
+  const final = await askAI(prompt,250,0.6);
   cache.set(key,final,21600);
   return final;
 }
@@ -488,16 +509,19 @@ async function bonusTrack() {
     [items[i],items[j]]=[items[j],items[i]];
   }
   // buscar link válido
-  const linkOk = async url=>{
-    if(!url) return false;
-    try {
-      const ctrl = new AbortController();
-      const id = setTimeout(()=>ctrl.abort(),2000);
-      const r = await fetch(url,{method:'HEAD',signal:ctrl.signal});
-      clearTimeout(id);
-      return r.ok;
-    } catch { return false; }
-  };
+const linkOk = async url => {
+  if (!url) return false;
+  try {
+    const ctrl = new AbortController();
+    // Aumentar el tiempo de espera a 5 segundos
+    const id = setTimeout(() => ctrl.abort(), 5000); 
+    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+    clearTimeout(id);
+    return r.ok;
+  } catch {
+    return false;
+  }
+};
   let pick=null;
   for(const it of items.slice(0,40)){
     const link=typeof it.link==='string'?it.link:it.link?.['@_href']||it.link?.['@_url'];
@@ -511,7 +535,7 @@ async function bonusTrack() {
 3. Cierra con una pregunta provocadora.
 4. Termina con (leer).
 `;
-  let txt = await askGPT(prompt,200,0.75);
+  let txt = await askAI(prompt,200,0.75);
   txt = txt.replace('(leer)',`(leer)(${pick.link})`);
   cache.set(key,txt,86400);
   return txt;
@@ -551,7 +575,7 @@ ${pendientesList.join('\n')||'—'}
 Big Rock:
 ${bigRocks.join('\n')||'—'}
 `;
-  const analisis = await askGPT(promptCoach,350,0.7);
+  const analisis = await askAI(promptCoach,350,0.7);
   return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
@@ -571,7 +595,7 @@ async function getSystemStatus() {
   const checks = await Promise.allSettled([
     sheetsClient().then(()=>`✅ Google Sheets`),
     calendarClient().then(()=>`✅ Google Calendar`),
-    askGPT('test',1).then(r=>r.includes('[')?`❌ OpenAI (${r})`:`✅ OpenAI`),
+    askAI('test',1).then(r=>r.includes('[')?`❌ OpenAI (${r})`:`✅ OpenAI`),
     getWeather().then(r=>r.includes('disponible')?`❌ OpenWeather`:`✅ OpenWeather`)
   ]);
   return `*Estado del Sistema Asistente JOYA*\n──────────────\n` +
