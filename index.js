@@ -283,8 +283,7 @@ async function intelGlobal() {
     'https://feeds.weblogssl.com/xataka2',      // Xataka
     'https://elordenmundial.com/feed/',         // El Orden Mundial
     'https://es.globalvoices.org/feed/',         // Global Voices en Español
-    'https://www.agenciassinc.es/rss'            // Agencia SINC (Ciencia)
-];
+    ];
   const parser   = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
   const xmlTexts = (await Promise.allSettled(
       FEEDS.map(u => fetch(u,{headers:{'User-Agent':'Mozilla/5.0'}}).then(r=>r.text()))
