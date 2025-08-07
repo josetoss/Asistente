@@ -323,8 +323,8 @@ async function getAgenda() {
     cache.set(cacheKey, lines, 300);
     return lines;
   } catch (e) {
-    console.error('getAgenda error:', e.message);
-    return ['(Error al obtener la agenda)'];
+     console.error('getAgenda error:', e.message); // <-- Añade esta línea
+        return ['(Error al obtener la agenda)'];
   }
 }
 /* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
@@ -559,24 +559,16 @@ async function intelGlobal() {
   const intereses = (await getIntereses()).join(', ')||'geopolítica, tecnología';
   const prompt = `
 👁️ Analista senior. Intereses: ${intereses}
-FORMATO:
-◼️ *<Categoría>*
-» **Titular N°X** — 2-3 líneas
-   • Oportunidad → …
-   • Riesgo      → …
-   • Implicancia para Chile → …
-   • [Fuente X]
-
-Escoge 4 titulares.
+Escoge 4 titulares. Para cada uno, escribe solo el titular y un resumen de 120-140 caracteres.
 Titulares:
 ${heads.map(h=>`${h.id}: ${h.title}`).join('\n')}
 `;
-  let out = await askAI(prompt,700,0.7);
-  heads.forEach(h=>{
-    out = out.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
-  });
-  cache.set(key,out,3600);
-  return out;
+let out = await askAI(prompt,700,0.7);
+heads.forEach(h=>{
+  out = out.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
+});
+cache.set(key,out,3600);
+return out;
 }
 
 /* ─── Horóscopo Supremo ─────────────────────────────────────────── */
@@ -609,66 +601,77 @@ ${drafts}
 
 /* ─── Bonus Track ───────────────────────────────────────────────── */
 async function bonusTrack() {
-  const key='bonusTrack';
-  if (cache.has(key)) return cache.get(key);
-  const FEEDS = [
-    'https://aeon.co/feed.rss','https://psyche.co/feed','https://www.noemamag.com/feed/',
-    'https://longnow.org/ideas/feed/','https://www.the-tls.co.uk/feed/','https://laphamsquarterly.org/rss.xml',
-    'https://www.nybooks.com/feed/','https://thepointmag.com/feed/','https://thebaffler.com/feed',
-    'https://quillette.com/feed/','https://palladiummag.com/feed/','https://nautil.us/feed/',
-    'https://www.quantamagazine.org/feed/','https://www.technologyreview.com/feed/',
-    'https://arstechnica.com/science/feed/','https://www.wired.com/feed/category/science/latest/rss',
-    'https://stratechery.com/feed/','https://knowingneurons.com/feed/','https://longreads.com/feed/',
-    'https://getpocket.com/explore/rss','https://publicdomainreview.org/feed/',
-    'https://daily.jstor.org/feed/','https://bigthink.com/feed/',
-    'https://sidebar.io/feed.xml','https://elgatoylacaja.com/feed/','https://ethic.es/feed/',
-    'https://principia.io/feed/','https://ctxt.es/es/rss.xml','https://elpais.com/rss/cultura.xml',
-    'https://hipertextual.com/feed','https://www.bbvaopenmind.com/en/feed/'
-  ];
-  const parser = new XMLParser({ignoreAttributes:false,attributeNamePrefix:'@_'});
-  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
-  const items = xmls.flatMap(x=>{
-    const f=parser.parse(x);
-    return f.rss?f.rss.channel.item:f.feed?f.feed.entry:[];
-  }).filter(Boolean);
-  // barajar
-  for (let i=items.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [items[i],items[j]]=[items[j],items[i]];
-  }
-  // buscar link válido
+  const key='bonusTrack';
+  if (cache.has(key)) return cache.get(key);
+  const FEEDS = [
+    'https://aeon.co/feed.rss','https://psyche.co/feed','https://www.noemamag.com/feed/',
+    'https://longnow.org/ideas/feed/','https://www.the-tls.co.uk/feed/','https://laphamsquarterly.org/rss.xml',
+    'https://www.nybooks.com/feed/','https://thepointmag.com/feed/','https://thebaffler.com/feed',
+    'https://quillette.com/feed/','https://palladiummag.com/feed/','https://nautil.us/feed/',
+    'https://www.quantamagazine.org/feed/','https://www.technologyreview.com/feed/',
+    'https://arstechnica.com/science/feed/','https://www.wired.com/feed/category/science/latest/rss',
+    'https://stratechery.com/feed/','https://knowingneurons.com/feed/','https://longreads.com/feed/',
+    'https://getpocket.com/explore/rss','https://publicdomainreview.org/feed/',
+    'https://daily.jstor.org/feed/','https://bigthink.com/feed/',
+    'https://sidebar.io/feed.xml','https://elgatoylacaja.com/feed/','https://ethic.es/feed/',
+    'https://principia.io/feed/','https://ctxt.es/es/rss.xml','https://elpais.com/rss/cultura.xml',
+    'https://hipertextual.com/feed','https://www.bbvaopenmind.com/en/feed/'
+  ];
+  const parser = new XMLParser({ignoreAttributes:false,attributeNamePrefix:'@_'});
+  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+  const items = xmls.flatMap(x=>{
+    const f=parser.parse(x);
+    return f.rss?f.rss.channel.item:f.feed?f.feed.entry:[];
+  }).filter(Boolean);
+  // barajar
+  for (let i=items.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [items[i],items[j]]=[items[j],items[i]];
+  }
+  // buscar link válido
 const linkOk = async url => {
-  if (!url) return false;
-  try {
-    const ctrl = new AbortController();
-    // Aumentar el tiempo de espera a 5 segundos
-    const id = setTimeout(() => ctrl.abort(), 5000); 
-    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
-    clearTimeout(id);
-    return r.ok;
-  } catch {
-    return false;
-  }
+  if (!url) return false;
+  try {
+    const ctrl = new AbortController();
+    // Aumentar el tiempo de espera a 8 segundos
+    const id = setTimeout(() => ctrl.abort(), 8000); 
+    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+    clearTimeout(id);
+    return r.ok;
+  } catch {
+    return false;
+  }
 };
-  let pick=null;
-  for(const it of items.slice(0,40)){
-    const link=typeof it.link==='string'?it.link:it.link?.['@_href']||it.link?.['@_url'];
-    if(await linkOk(link)){ pick={title:it.title,link}; break; }
-  }
-  if(!pick) return 'No se encontró artículo válido.';
-  const prompt = `
+  let pick=null;
+  for(const it of items.slice(0,40)){
+    const link=typeof it.link==='string'?it.link:it.link?.['@_href']||it.link?.['@_url'];
+    if(await linkOk(link)){ pick={title:it.title,link}; break; }
+  }
+  if(!pick) {
+    // Respuesta de respaldo si no se encuentra ningún artículo válido
+    const fallbackFacts = [
+        "El término 'geek' fue creado para referirse a artistas de circo que hacían espectáculos extraños, como arrancar la cabeza de gallinas vivas.",
+        "El corazón humano tiene la misma fuerza que puede impulsar la sangre hasta tres pisos de altura.",
+        "Las hormigas pueden levantar hasta 50 veces su propio peso y arrastrar 30 veces su peso.",
+        "El ojo del avestruz es más grande que su cerebro.",
+        "Los osos polares tienen la piel negra para absorber mejor el calor del sol."
+    ];
+    const randomFact = fallbackFacts[Math.floor(Math.random() * fallbackFacts.length)];
+    return `🎁 **Bonus Track: Dato Curioso**\n${randomFact}`;
+}
+
+  const prompt = `
 🔍 Ensayo: «${pick.title}».
 1. Resume en 2-3 líneas su valor para un profesional ocupado.
-2. Relaciónalo con filosofía, ciencia o historia.
+2. Relaciónalo con filosofía, ciencia, tecnología, cine, televisión, cultura pop o historia.
 3. Cierra con una pregunta provocadora.
 4. Termina con (leer).
 `;
-  let txt = await askAI(prompt,200,0.75);
-  txt = txt.replace('(leer)',`(leer)(${pick.link})`);
-  cache.set(key,txt,86400);
-  return txt;
+  let txt = await askAI(prompt,200,0.75);
+  txt = txt.replace('(leer)',`(leer)(${pick.link})`);
+  cache.set(key,txt,86400);
+  return txt;
 }
-
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   const [clima, bigRocks, agendaList, pendientesList] = await Promise.all([
@@ -690,7 +693,7 @@ async function briefFull() {
   ]);
   const promptCoach = `
 ⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal.
-Tu respuesta en 4 puntos:
+Tu respuesta en 4 puntos, cada uno de no más de 55 caracteres.
 1. **Foco Principal:** ...
 2. **Riesgo a Mitigar:** ...
 3. **Acción Clave:** ...
@@ -703,7 +706,7 @@ ${pendientesList.join('\n')||'—'}
 Big Rock:
 ${bigRocks.join('\n')||'—'}
 `;
-  const analisis = await askAI(promptCoach,350,0.7);
+const analisis = await askAI(promptCoach,350,0.7);
   return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
