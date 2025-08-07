@@ -237,35 +237,66 @@ async function getPendientes() {
   return out;
 }
 
+// Reemplaza tu función getAgenda por esta en index.js
 async function getAgenda() {
-  const key='agenda';
-  if (cache.has(key)) return cache.get(key);
-  const cal = await calendarClient();
-  const tz  = 'America/Santiago';
-  const now = DateTime.local().setZone(tz);
-  const end = now.endOf('day');
-  const listCalendars = (await cal.calendarList.list()).data.items||[];
-  const allEvents = (await Promise.all(
-    listCalendars.map(c=>
-      cal.events.list({
-        calendarId:c.id,
-        timeMin: now.toISO(),
-        timeMax: end.toISO(),
-        singleEvents: true,
-        orderBy: 'startTime'
-      })
-    )
-  )).flatMap(r=>r.data.items||[])
-    .sort((a,b)=> new Date(a.start.dateTime||a.start.date) - new Date(b.start.dateTime||b.start.date))
-    .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
-    .map(e=>{
+  const cacheKey = 'agenda';
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+
+  try {
+    const cal = await calendarClient();
+    // 1) Listar TODOS los calendarios de la cuenta
+    const { data: { items: calendars } } = await cal.calendarList.list();
+
+    // 2) Filtrar calendarios no deseados (por ejemplo, Birthdays, Tasks)
+    const exclude = ['birthdays', 'tasks'];
+    const tz = 'America/Santiago';
+    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
+    const todayEnd   = DateTime.local().setZone(tz).endOf('day').toISO();
+
+    // 3) Para cada calendario válido, pedir sus eventos de hoy
+    const eventLists = await Promise.all(
+      calendars
+        .filter(c =>
+          // Incluir solo si está visible y no es automático de Google
+          c.selected !== false &&
+          !exclude.some(x => c.id.toLowerCase().includes(x))
+        )
+        .map(c => cal.events.list({
+          calendarId: c.id,
+          timeMin: todayStart,
+          timeMax: todayEnd,
+          singleEvents: true,
+          orderBy: 'startTime'
+        }))
+    );
+
+    // 4) Aplanar y ordenar por hora de inicio
+    const allEvents = eventLists
+      .flatMap(r => r.data.items || [])
+      .sort((a, b) => {
+        const tA = new Date(a.start.dateTime || a.start.date).getTime();
+        const tB = new Date(b.start.dateTime || b.start.date).getTime();
+        return tA - tB;
+      });
+
+    // 5) Formatear líneas de texto
+    const lines = allEvents.map(e => {
       const hora = e.start.dateTime
-        ? DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm')
+        ? DateTime.fromISO(e.start.dateTime, { zone: tz }).toFormat('HH:mm')
         : 'Todo el día';
-      return `• ${hora} – ${e.summary||'(sin título)'}`;
+      // Incluir prefijo del calendario para distinguir orígenes
+      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary
+                    || calendars.find(c => c.id === e.calendarId)?.summary
+                    || 'Evento';
+      return `• [${calName}] ${hora} – ${e.summary || '(sin título)'}`;
     });
-  cache.set(key, allEvents, 300);
-  return allEvents;
+
+    cache.set(cacheKey, lines, 300);
+    return lines;
+  } catch (e) {
+    console.error('getAgenda error:', e.message);
+    return ['(Error al obtener la agenda)'];
+  }
 }
 
 /* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
