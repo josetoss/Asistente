@@ -72,8 +72,11 @@ const sheetsClient = singleton(async () =>
 );
 const calendarClient = singleton(async () =>
   google.calendar({
-    version:'v3',
-    auth: await googleClient(['https://www.googleapis.com/auth/calendar.readonly'])
+    version: 'v3',
+    auth: await googleClient([
+      // We need full calendar scope to list calendars and events without 403
+      'https://www.googleapis.com/auth/calendar'
+    ])
   })
 );
 
