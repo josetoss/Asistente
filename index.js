@@ -71,13 +71,14 @@ const sheetsClient = singleton(async () =>
   google.sheets({ version:'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
 );
 const calendarClient = singleton(async () =>
-   google.calendar({
-     version: 'v3',
-     auth: await googleClient([
-       'https://www.googleapis.com/auth/calendar'
-     ])
-   })
- );
+  google.calendar({
+    version: 'v3',
+    auth: await googleClient([
+      'https://www.googleapis.com/auth/calendar.readonly',
+      'https://www.googleapis.com/auth/calendar.events',           // <- para poder insertar
+      'https://www.googleapis.com/auth/calendar.events.readonly'
+    ])
+  }));
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
   if (!chatId || !txt) return;
@@ -359,7 +360,7 @@ async function askGPT(prompt, max_tokens=300, temperature=0.6) {
     method:'POST',
     headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},
     body: JSON.stringify({
-      model:'gpt-4o-mini',
+      model:'o4-mini',
       messages:[{role:'user',content:prompt}],
       max_tokens, temperature
     })
