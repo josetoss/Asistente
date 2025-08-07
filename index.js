@@ -284,21 +284,46 @@ async function intelGlobal() {
     'https://elordenmundial.com/feed/',         // El Orden Mundial
     'https://es.globalvoices.org/feed/',         // Global Voices en Español
     ];
-  const parser   = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
-  const xmlTexts = (await Promise.allSettled(
-      FEEDS.map(u => fetch(u,{headers:{'User-Agent':'Mozilla/5.0'}}).then(r=>r.text()))
-    )).filter(r => r.status === 'fulfilled').map(r => r.value);
+   const parser   = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
+  const xmlTexts = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+
+  if (!xmlTexts.length) return 'No se pudo acceder a los feeds de noticias hoy.';
 
   const items = xmlTexts.flatMap(x => {
     const f = parser.parse(x);
     return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
-  }).slice(0,40);
+  }).slice(0, 40);
 
-  const heads = items.map((it,i)=>({
-    id   : i+1,
+  const headlines = items.map((it, i) => ({
+    id   : i + 1,
     title: it.title,
-    link : typeof it.link==='string'?it.link:it.link?.['@_href']
+    link : typeof it.link === 'string' ? it.link : it.link?.['@_href']
   }));
+
+  const intereses = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
+  const promptIntel = `
+👁️ Eres analista senior. Intereses: ${intereses}
+Formato obligatorio:
+◼️ *<Categoría>*
+» **Titular N°X** — 2-3 líneas
+   • Oportunidad → …
+   • Riesgo      → …
+   • Implicancia para Chile → …
+   • [Fuente X]
+
+Elige 4 titulares.
+Titulares:
+${headlines.map(h => `${h.id}: ${h.title}`).join('\n')}
+  `;
+
+  let texto = await askGPT(promptIntel, 700, 0.7);
+  headlines.forEach(h => {
+    texto = texto.replace(`[Fuente ${h.id}]`, `[Ver fuente](${h.link})`);
+  });
+
+  cache.set(k, texto, 3600);
+  return texto;
+}
 
   /* 2.  prompt IA mejorado */
   const intereses = (await getIntereses()).join(', ') || 'geopolítica y tecnología';
@@ -389,8 +414,7 @@ async function bonusTrack() {
 
     // === En Español de Alta Calidad ===
     'https://elgatoylacaja.com/feed/',
-    'https://www.agenciassinc.es/rss', // Agencia SINC (Ciencia)
-    'https://ethic.es/feed/',
+        'https://ethic.es/feed/',
     'https://principia.io/feed/',
     'https://ctxt.es/es/rss.xml' // CTXT
 
@@ -401,21 +425,31 @@ async function bonusTrack() {
   const pick   = items[Math.floor(Math.random()*Math.min(items.length,15))];
   const art    = { title: pick.title, link: typeof pick.link==='string'?pick.link:pick.link?.['@_href'] };
 
-  const promptBonus = `
+ const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
+  const xmls   = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+
+  if (!xmls.length) return 'No hay artículos disponibles hoy.';
+
+  const items  = xmls.flatMap(x => {
+    const f = parser.parse(x);
+    return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
+  });
+  const pick   = items[Math.floor(Math.random() * Math.min(items.length, 15))];
+  const art    = { title: pick.title, link: typeof pick.link === 'string' ? pick.link : pick.link?.['@_href'] };
+
+  const prompt = `
 🔍 Ensayo detectado: «${art.title}».
-
-1. Resume en 2-3 líneas su valor para un profesional ocupado.  
-2. Relaciónalo con un interés extralaboral (filosofía/ciencia/historia).  
-3. Termina con una pregunta provocadora.  
+1. Resume en 2-3 líneas su valor para un profesional ocupado.
+2. Relaciónalo con un interés extra-laboral (filosofía, ciencia o historia).
+3. Termina con una pregunta provocadora.
 4. Cierra con (leer).
-
-¡Redacta!`;
-  const txt = await askGPT(promptBonus,200,0.75)
+  `;
+  const txt = await askGPT(prompt, 200, 0.75)
                  .replace('(leer)', `(leer)(${art.link})`);
-  cache.set(k,txt,86400);        // 24 h
+
+  cache.set(k, txt, 86400);
   return txt;
 }
-
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   const [cl, rock, ag] = await Promise.all([weather(), bigRocks(), agenda()]);
@@ -491,3 +525,11 @@ app.post(`/webhook/${TELEGRAM_SECRET}`, async (req,res)=>{
 app.get('/healthz',(_,res)=>res.send('ok'));
 
 app.listen(PORT,()=>console.log(`🚀 Joya Ultimate corriendo en ${PORT}`));
+
+/* ─── helper seguro (colócalo arriba, 1 sola vez) ───────────────── */
+const fetchSafe = (url, ms = 3000) =>
+  Promise.race([
+    fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }).then(r => r.text()),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ]).catch(() => null); // nunca lanza, devuelve null si falla
+
