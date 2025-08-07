@@ -450,6 +450,7 @@ async function bonusTrack() {
 }
 
 /* ─── Briefs ────────────────────────────────────────────────────── */
+/* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   // CORRECCIÓN: Usamos nombres de variables descriptivos y consistentes.
   const [clima, bigRock, agenda, pendientes] = await Promise.all([
@@ -463,18 +464,20 @@ async function briefShort() {
     '⚡️ *Resumen Rápido*',
     banner('Clima', '🌦️'), 
     clima,
-    banner('Misión Principal (Big Rock)', '🚀'), 
+    banner('Misión Principal', '🚀'), 
     bigRock.length ? bigRock.join('\n') : '_(No definido)_',
-    banner('Focos Críticos (Pendientes)', '🔥'),
+    banner('Focos Críticos', '🔥'),
     pendientes.length ? pendientes.join('\n') : '_(Sin pendientes)_',
     banner('Agenda del Día', '📅'), 
     agenda.length ? agenda.join('\n') : '_(Sin eventos)_'
   ].join('\n\n');
 }
+
 async function briefFull() {
     await addWorkAgendaToPersonalCalendar(); // Sincroniza la agenda primero
 
-    const [cl, ag, pend, rock, intel, horo, bonus] = await Promise.all([
+    // CORRECCIÓN: Usamos nombres de variables descriptivos y consistentes.
+    const [clima, agenda, pendientes, bigRock, intel, horo, bonus] = await Promise.all([
         weather(), agenda(), pendientes(), bigRocks(), intelGlobal(), horoscopo(), bonusTrack()
     ]);
 
@@ -488,11 +491,11 @@ async function briefFull() {
     Responde en español.
 
     Agenda:
-    ${ag.join('\n') || '—'}
+    ${agenda.join('\n') || '—'}
     Pendientes:
-    ${pend.join('\n') || '—'}
+    ${pendientes.join('\n') || '—'}
     Big Rock:
-    ${rock.join('\n') || '—'}
+    ${bigRock.join('\n') || '—'}
     `;
     const analisis = await askGPT(promptCoach, 300, 0.65);
 
@@ -500,38 +503,15 @@ async function briefFull() {
         '🗞️ *MORNING BRIEF ULTIMATE*',
         `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
         banner('Análisis Estratégico', '🧠'), analisis,
-        banner('Clima', '🌦️'), cl,
-        banner('Agenda', '📅'), ag.join('\n') || '_(Sin eventos)_',
-        banner('Pendientes Críticos', '🔥'), pend.join('\n') || '_(Sin pendientes)_',
-        banner('Tu Misión Principal (Big Rock)', '🚀'), rock.join('\n') || '_(No definido)_',
+        banner('Clima', '🌦️'), clima,
+        banner('Agenda', '📅'), agenda.length ? agenda.join('\n') : '_(Sin eventos)_',
+        banner('Pendientes Críticos', '🔥'), pendientes.length ? pendientes.join('\n') : '_(Sin pendientes)_',
+        banner('Tu Misión Principal (Big Rock)', '🚀'), bigRock.length ? bigRock.join('\n') : '_(No definido)_',
         banner('Radar de Inteligencia Global', '🌍'), intel,
-        banner('Horóscopo (Libra)', '🔮'), horo,
+        banner('Horóscopo (Libra)', '🔮'), horoscopo,
         banner('Bonus Track', '🎁'), bonus
     ].join('\n\n');
 }
-
-/* ─── Command Router ───────────────────────────────────────────── */
-async function router(msg){
-  const [cmd,...rest]=(msg.text||'').trim().split(' ');
-  const arg=rest.join(' ').trim();
-  switch(cmd){
-    case '/start':
-    case '/help':
-      return '*JOYA* comandos:\n/brief /briefcompleto\n/addrock <t> /removerock <t>\n/addinteres <t> /removeinteres <t>\n/status';
-    
-    case '/brief':         return await briefShort();
-    case '/briefcompleto': return await briefFull();
-    case '/status':        return await getSystemStatus(); // <-- NUEVO COMANDO
-    
-    case '/addrock':       return arg?await addUnique('BigRocks',arg):'✏️ Falta texto';
-    case '/removerock':    return arg?await removeRow('BigRocks',arg):'✏️ Falta texto';
-    case '/addinteres':    return arg?await addUnique('Intereses',arg):'✏️ Falta texto';
-    case '/removeinteres': return arg?await removeRow('Intereses',arg):'✏️ Falta texto';
-    
-    default:               return '🤖 Comando desconocido. Usa /help';
-  }
-}
-
 /* ─── Routes & Server ──────────────────────────────────────────── */
 app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
   // ① Responde 200 OK inmediatamente a Telegram
