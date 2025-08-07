@@ -283,50 +283,52 @@ async function getPendientes() {
 }
 
 async function getAgenda() {
-  const cacheKey = 'agenda';
-  if (cache.has(cacheKey)) return cache.get(cacheKey);
-  try {
-    const cal = await calendarClient();
-    const {
-      data: {
-        items: calendars
-      }
-    } = await cal.calendarList.list();
-    const exclude = ['birthdays', 'tasks', 'familia'];
-    const tz = 'America/Santiago';
-    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
-    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
-    const eventLists = await Promise.all(
-      calendars
-      .filter(c => c.selected !== false && !exclude.some(x => c.id.toLowerCase().includes(x)))
-      .map(c => cal.events.list({
-        calendarId: c.id,
-        timeMin: todayStart,
-        timeMax: todayEnd,
-        singleEvents: true,
-        orderBy: 'startTime'
-      }))
-    );
-    const allEvents = eventLists
-      .flatMap(r => r.data.items || [])
-      .sort((a, b) => {
-        const tA = new Date(a.start.dateTime || a.start.date).getTime();
-        const tB = new Date(b.start.dateTime || b.start.date).getTime();
-        return tA - tB;
-      });
-    const lines = allEvents.map(e => {
-      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, {
-        zone: tz
-      }).toFormat('HH:mm') : 'Todo el día';
-      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary || calendars.find(c => c.id === e.calendarId)?.summary || 'Evento';
-      return `• [${calName}] ${hora} – ${e.summary || '(sin título)'}`;
-    });
-    cache.set(cacheKey, lines, 300);
-    return lines;
-  } catch (e) {
-     console.error('getAgenda error:', e.message); // <-- Añade esta línea
-        return ['(Error al obtener la agenda)'];
-  }
+  const cacheKey = 'agenda';
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  try {
+    const cal = await calendarClient();
+    const {
+      data: {
+        items: calendars
+      }
+    } = await cal.calendarList.list();
+    // === Cambio aquí: de 'exclude' a 'include' ===
+    const include = ['jose tomas serrano', 'agenda oficina (importada)'];
+    const tz = 'America/Santiago';
+    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
+    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
+    const eventLists = await Promise.all(
+      calendars
+      // === Filtramos solo los calendarios que están en la lista 'include' ===
+      .filter(c => c.selected !== false && include.some(x => c.summary?.toLowerCase() === x))
+      .map(c => cal.events.list({
+        calendarId: c.id,
+        timeMin: todayStart,
+        timeMax: todayEnd,
+        singleEvents: true,
+        orderBy: 'startTime'
+      }))
+    );
+    const allEvents = eventLists
+      .flatMap(r => r.data.items || [])
+      .sort((a, b) => {
+        const tA = new Date(a.start.dateTime || a.start.date).getTime();
+        const tB = new Date(b.start.dateTime || b.start.date).getTime();
+        return tA - tB;
+      });
+    const lines = allEvents.map(e => {
+      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, {
+        zone: tz
+      }).toFormat('HH:mm') : 'Todo el día';
+      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary || calendars.find(c => c.id === e.calendarId)?.summary || 'Evento';
+      return `• [${calName}] ${hora} – ${e.summary || '(sin título)'}`;
+    });
+    cache.set(cacheKey, lines, 300);
+    return lines;
+  } catch (e) {
+    console.error('getAgenda error:', e.message);
+      return ['(Error al obtener la agenda)'];
+  }
 }
 /* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
 async function addWorkAgendaToPersonalCalendar() {
