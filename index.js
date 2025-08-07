@@ -10,6 +10,10 @@ import fetchPkg from 'node-fetch';
 import { google } from 'googleapis';
 import { DateTime } from 'luxon';
 import { XMLParser } from 'fast-xml-parser';
+const singleton = fn => {
+  let inst;
+  return (...args) => inst ?? (inst = fn(...args));
+};
 
 // ───── POLYFILL fetch (Node 18 < 18.20) ───────────────────────────
 if (typeof globalThis.fetch !== 'function') {
@@ -58,7 +62,7 @@ const fetchSafe = (url, ms = 3000) =>
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
   ]).catch(() => null);
 
-// ─── Google Auth Singleton con validación de JSON ─────────────────────────────────
+// ─── Google Auth Singleton con validación de JSON ────────────
 const googleClient = singleton(async (scopes) => {
   // 1. Leer credenciales crudas (JSON o Base64)
   const raw = GOOGLE_CREDENTIALS ||
@@ -82,7 +86,6 @@ const googleClient = singleton(async (scopes) => {
     scopes
   }).getClient();
 });
-
 
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
