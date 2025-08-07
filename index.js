@@ -71,15 +71,13 @@ const sheetsClient = singleton(async () =>
   google.sheets({ version:'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
 );
 const calendarClient = singleton(async () =>
-  google.calendar({
-    version: 'v3',
-    auth: await googleClient([
-      // We need full calendar scope to list calendars and events without 403
-      'https://www.googleapis.com/auth/calendar'
-    ])
-  })
-);
-
+   google.calendar({
+     version: 'v3',
+     auth: await googleClient([
+       'https://www.googleapis.com/auth/calendar'
+     ])
+   })
+ );
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
   if (!chatId || !txt) return;
