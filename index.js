@@ -450,6 +450,7 @@ async function bonusTrack() {
 }
 
 /* ─── Briefs ────────────────────────────────────────────────────── */
+/* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   const [clima, bigRock, agenda, pendientes] = await Promise.all([
     weather(), 
@@ -459,18 +460,17 @@ async function briefShort() {
   ]);
 
   return [
-    ⚡️ *Resumen Rápido*',
+    '⚡️ *Resumen Rápido*',
     banner('Clima', '🌦️'), 
     clima,
-    banner('Misión Principal', '🚀'), 
+    banner('Misión Principal (Big Rock)', '🚀'), 
     bigRock.length ? bigRock.join('\n') : '_(No definido)_',
-    banner('Focos Críticos', '🔥'),
+    banner('Focos Críticos (Pendientes)', '🔥'),
     pendientes.length ? pendientes.join('\n') : '_(Sin pendientes)_',
     banner('Agenda del Día', '📅'), 
     agenda.length ? agenda.join('\n') : '_(Sin eventos)_'
   ].join('\n\n');
 }
-
 async function briefFull() {
     await addWorkAgendaToPersonalCalendar(); // Sincroniza la agenda primero
 
