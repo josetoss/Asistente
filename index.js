@@ -356,44 +356,116 @@ async function addWorkAgendaToPersonalCalendar() {
     console.error('addWorkAgenda error:', e.message);
   }
 }
+
 /* ─── AI helpers (GPT & Gemini) ────────────────────────────────── */
+// ⚠️ Nota: Asegúrate de que OPENAI_API_KEY y GEMINI_API_KEY estén definidos en tus variables de entorno.
 
-// Mantén tus funciones askGPT y askGemini existentes sin cambios.
+const { AI_MODEL = 'gemini' } = process.env; // Usa 'gemini' por defecto, cámbialo si prefieres 'gpt'
 
-async function askAI(prompt, max_tokens, temperature) {
-  // Configura las promesas para llamar a ambos modelos en paralelo
-  const [responseGemini, responseGPT] = await Promise.all([
-    askGemini(prompt, max_tokens, temperature),
-    askGPT(prompt, max_tokens, temperature),
-  ]);
-
-  // Si uno de los modelos falla, simplemente usa la respuesta del otro.
-  if (responseGemini.startsWith('[Gemini error')) {
-    return `(Usando solo GPT)\n\n${responseGPT}`;
-  }
-  if (responseGPT.startsWith('[GPT error')) {
-    return `(Usando solo Gemini)\n\n${responseGemini}`;
-  }
-
-  // Si ambos responden, usa uno de ellos para conciliar las respuestas.
-  const reconciliationPrompt = `
-    Eres un editor experto. Has recibido dos borradores para el mismo prompt. 
-    Combina las siguientes dos respuestas en una sola, concisa, y fluida. 
-    Mantén la información más relevante y el tono profesional.
-    ---
-    Respuesta 1 (Gemini):
-    ${responseGemini}
-    ---
-    Respuesta 2 (GPT):
-    ${responseGPT}
-  `;
-
-  // Usa el modelo principal (por defecto Gemini) para la conciliación.
-  const finalResponse = await askGemini(reconciliationPrompt, max_tokens, 0.5);
-
-  return finalResponse;
+// 1. **Primero** define la función para OpenAI
+async function askGPT(prompt, max_tokens = 300, temperature = 0.6) {
+    if (!OPENAI_API_KEY) return '[OPENAI_API_KEY faltante]';
+    try {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [{
+                    role: 'user',
+                    content: prompt
+                }],
+                max_tokens,
+                temperature
+            })
+        });
+        if (!res.ok) {
+            console.error('GPT error:', res.statusText);
+            return `[GPT error: ${res.statusText}]`;
+        }
+        const j = await res.json();
+        return j.choices?.[0]?.message?.content?.trim() || '[GPT vacío]';
+    } catch (e) {
+        console.error('GPT fetch error:', e.message);
+        return `[GPT error: ${e.message}]`;
+    }
 }
 
+// 2. **Luego** define la función para Google Gemini
+async function askGemini(prompt, max_tokens = 300, temperature = 0.6) {
+    if (!GEMINI_API_KEY) return '[GEMINI_API_KEY faltante]';
+    try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${GEMINI_API_KEY}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                contents: [{
+                    role: 'user',
+                    parts: [{
+                        text: prompt
+                    }]
+                }],
+                generationConfig: {
+                    maxOutputTokens: max_tokens,
+                    temperature: temperature
+                }
+            })
+        });
+        if (!res.ok) {
+            const errorBody = await res.text();
+            console.error('Gemini error:', res.status, errorBody);
+            return `[Gemini error: ${res.statusText}]`;
+        }
+        const j = await res.json();
+        return j.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '[Gemini vacío]';
+    } catch (e) {
+        console.error('Gemini fetch error:', e.message);
+        return `[Gemini error: ${e.message}]`;
+    }
+}
+
+// 3. **Finalmente**, define la función unificadora `askAI`
+async function askAI(prompt, max_tokens, temperature) {
+    const [responseGemini, responseGPT] = await Promise.all([
+        askGemini(prompt, max_tokens, temperature),
+        askGPT(prompt, max_tokens, temperature),
+    ]);
+
+    // Si ambos fallan, devolvemos un mensaje de error
+    if (responseGemini.startsWith('[Gemini error') && responseGPT.startsWith('[GPT error')) {
+        return `[Error de IA: Ambos modelos fallaron]`;
+    }
+
+    // Si uno de los modelos falla, simplemente usa la respuesta del otro.
+    if (responseGemini.startsWith('[Gemini error')) {
+        return `(Usando solo GPT)\n\n${responseGPT}`;
+    }
+    if (responseGPT.startsWith('[GPT error')) {
+        return `(Usando solo Gemini)\n\n${responseGemini}`;
+    }
+
+    // Si ambos responden, usa uno de ellos para conciliar las respuestas.
+    const reconciliationPrompt = `
+      Eres un editor experto. Has recibido dos borradores para el mismo prompt.
+      Combina las siguientes dos respuestas en una sola, concisa, y fluida.
+      Mantén la información más relevante y el tono profesional.
+      ---
+      Respuesta 1 (Gemini):
+      ${responseGemini}
+      ---
+      Respuesta 2 (GPT):
+      ${responseGPT}
+    `;
+
+    // Usa el modelo principal para la conciliación.
+    const finalResponse = await askGemini(reconciliationPrompt, max_tokens, 0.5);
+    return finalResponse;
+}
 /* ─── Radar Inteligencia Global ───────────────────────────────── */
 async function intelGlobal() {
   const key='intelGlobal';
