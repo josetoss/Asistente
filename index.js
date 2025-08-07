@@ -249,36 +249,37 @@ async function getIntereses() {
 }
 
 async function getPendientes() {
-  const key = 'pendientes';
-  if (cache.has(key)) return cache.get(key);
-  try {
-    const gs = await sheetsClient();
-    const res = await gs.spreadsheets.values.get({
-      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-      range: 'Pendientes!A2:G'
-    });
-    const rows = res.data.values || [];
-    const today = DateTime.local().startOf('day');
-    const out = rows.map(r => ({
-        tarea: r[1] || '(sin descripción)',
-        vence: r[2] ? DateTime.fromJSDate(new Date(r[2])) : null,
-        estado: (r[4] || '').toLowerCase(),
-        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
-      }))
-      .filter(p => !['done', 'discarded', 'waiting'].includes(p.estado))
-      .map(p => ({
-        ...p,
-        atras: p.vence && p.vence < today
-      }))
-      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
-      .slice(0, 5)
-      .map(p => `${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
-    cache.set(key, out, 120);
-    return out;
-  } catch (e) {
-    console.error('getPendientes error:', e.message);
-    return ['(Error al obtener pendientes)'];
-  }
+  const key = 'pendientes';
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const gs = await sheetsClient();
+    const res = await gs.spreadsheets.values.get({
+      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
+      range: 'Pendientes!A2:G'
+    });
+    const rows = res.data.values || [];
+    const today = DateTime.local().startOf('day');
+    const out = rows.map(r => ({
+        tarea: r[1] || '(sin descripción)',
+        vence: r[2] ? DateTime.fromJSDate(new Date(r[2])) : null,
+        estado: (r[4] || '').toLowerCase(),
+        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
+      }))
+      .filter(p => !['done', 'discarded', 'waiting'].includes(p.estado))
+      .map(p => ({
+        ...p,
+        atras: p.vence && p.vence < today
+      }))
+      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
+      .slice(0, 5)
+      .map(p => `${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
+    cache.set(key, out, 120);
+    return out;
+  } catch (e) {
+    console.error('getPendientes error:', e.message);
+    // La línea de abajo te permitirá ver un mensaje de error detallado en el brief
+    return [`❌ Error al obtener pendientes: ${e.message}`];
+  }
 }
 
 async function getAgenda() {
@@ -291,7 +292,7 @@ async function getAgenda() {
         items: calendars
       }
     } = await cal.calendarList.list();
-    const exclude = ['birthdays', 'tasks'];
+    const exclude = ['birthdays', 'tasks', 'familia'];
     const tz = 'America/Santiago';
     const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
     const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
