@@ -181,26 +181,46 @@ async function pendientes() {
   return list;
 }
 
-async function agenda() {
-  const k='agenda'; if(cache.has(k)) return cache.get(k);
-  const cal = await calendarClient();
-  const tz  = 'America/Santiago';
-  const now = DateTime.local().setZone(tz);
-  const end = now.endOf('day');
+/* ─── Sincronizador de Agenda (Función Complementada) ─────────────── */
+async function addWorkAgendaToPersonalCalendar() {
+    const key = 'agenda_sync';
+    if (cache.has(key)) return;
+    try {
+        const sheets = await sheetsClient();
+        const calendar = await calendarClient();
+        const CALENDARIO_IMPORTADO = 'Agenda oficina (importada)';
 
-  const metas  = await cal.calendarList.list();
-  const events = (await Promise.all(
-    metas.data.items.map(c => cal.events.list({
-      calendarId:c.id,timeMin:now.toISO(),timeMax:end.toISO(),
-      singleEvents:true,orderBy:'startTime'
-    }))
-  )).flatMap(r=>r.data.items||[])
-    .sort((a,b)=>new Date(a.start.dateTime||a.start.date)-new Date(b.start.dateTime||b.start.date))
-    .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
-    .map(e=>`• ${e.start.dateTime?DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm'):'Todo el día'} – ${e.summary||'(sin título)'}`);
+        if (!sheets || !calendar || !AGENDA_SHEET_ID) return;
 
-  cache.set(k,events,300);
-  return events;
+        const calendars = await calendar.calendarList.list();
+        let bufferCal = calendars.data.items.find(c => c.summary === CALENDARIO_IMPORTADO);
+        if (!bufferCal) {
+            const newCal = await calendar.calendars.insert({ resource: { summary: CALENDARIO_IMPORTADO } });
+            bufferCal = newCal.data;
+        }
+
+        const res = await sheets.spreadsheets.values.get({ spreadsheetId: AGENDA_SHEET_ID, range: 'Hoja 1!A2:C' });
+        const rows = res.data.values || [];
+        const tz = 'America/Santiago';
+        const hoy = DateTime.local().setZone(tz);
+        const existentes = await calendar.events.list({ calendarId: bufferCal.id, timeMin: hoy.startOf('day').toISO(), timeMax: hoy.endOf('day').toISO(), singleEvents: true });
+        const existingEvents = new Set(existentes.data.items.map(e => `${e.summary}@${e.start.dateTime}`));
+
+        for (const row of rows) {
+            const [titulo, inicioRaw, finRaw] = row;
+            if (!titulo || !inicioRaw) continue;
+            const inicio = DateTime.fromJSDate(new Date(inicioRaw), { zone: tz });
+            const fin = finRaw ? DateTime.fromJSDate(new Date(finRaw), { zone: tz }) : inicio.plus({ minutes: 30 });
+            const eventKey = `${titulo}@${inicio.toISO()}`;
+            if (!existingEvents.has(eventKey) && !titulo.toLowerCase().includes('office')) {
+                await calendar.events.insert({
+                    calendarId: bufferCal.id,
+                    resource: { summary: titulo, start: { dateTime: inicio.toISO(), timeZone: tz }, end: { dateTime: fin.toISO(), timeZone: tz } }
+                });
+            }
+        }
+        cache.set(key, true, 3600); // Evita resincronizar por 1 hora
+    } catch (e) { console.error('addWorkAgendaToPersonalCalendar:', e.message); }
 }
 
 /* ─── GPT helper ────────────────────────────────────────────────── */
@@ -431,49 +451,53 @@ async function bonusTrack() {
 
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
-  const [cl, rock, ag] = await Promise.all([weather(), bigRocks(), agenda()]);
-  return [
-    '⚡️ *Resumen rápido*',
-    banner('Clima','🌦'), cl,
-    banner('Big Rock','🚀'), rock.join('\n')||'_(No definido)_',
-    banner('Agenda','📅'), ag.join('\n')||'_(Sin eventos)_'
-  ].join('\n');
+    const [cl, rock, ag, pend] = await Promise.all([weather(), bigRocks(), agenda(), pendientes()]);
+    return [
+        '⚡️ *Resumen Rápido*',
+        banner('Clima', '🌦️'), cl,
+        banner('Misión Principal', '🚀'), rock.length ? rock.join('\n') : '_(No definido)_',
+        banner('Focos Críticos', '🔥'), pend.length ? pend.join('\n') : '_(Sin pendientes)_',
+        banner('Agenda', '📅'), ag.length ? ag.join('\n') : '_(Sin eventos)_'
+    ].join('\n\n');
 }
 
 async function briefFull() {
-  const [cl, ag, pend, rock, intel, horo, bonus] = await Promise.all([
-    weather(), agenda(), pendientes(), bigRocks(), intelGlobal(), horoscopo(), bonusTrack()
-  ]);
+    await addWorkAgendaToPersonalCalendar(); // Sincroniza la agenda primero
 
-  const promptCoach = `
-⚔️ Actúa como estratega militar y monje estoico.
-Tres viñetas:
-1️⃣ Foco Principal
-2️⃣ Riesgo a Mitigar
-3️⃣ Acción Clave
-Luego: “El éxito hoy se medirá por: …”
+    const [cl, ag, pend, rock, intel, horo, bonus] = await Promise.all([
+        weather(), agenda(), pendientes(), bigRocks(), intelGlobal(), horoscopo(), bonusTrack()
+    ]);
 
-Agenda:
-${ag.join('\n')||'—'}
-Pendientes:
-${pend.join('\n')||'—'}
-Big Rock:
-${rock.join('\n')||'—'}
-  `;
-  const analisis = await askGPT(promptCoach,250,0.65);
+    const promptCoach = `
+    ⚔️ Actúa como estratega militar y monje estoico. Analiza los siguientes datos del día.
+    Responde con tres viñetas concisas y potentes:
+    1️⃣ Foco Principal: ¿Cuál es la única cosa que debe lograrse hoy?
+    2️⃣ Riesgo a Mitigar: ¿Cuál es la mayor distracción o peligro para el foco?
+    3️⃣ Acción Clave: ¿Cuál es la primera acción tangible a ejecutar?
+    Finalmente, añade una línea: "El éxito hoy se medirá por: <define una métrica clara>".
+    Responde en español.
 
-  return [
-    '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
-    `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
-    banner('Análisis Estratégico','🧠'), analisis,
-    banner('Clima','🌦'), cl,
-    banner('Agenda','📅'), ag.join('\n')||'_(Sin eventos)_',
-    banner('Pendientes','🔥'), pend.join('\n')||'_(Sin pendientes)_',
-    banner('Big Rock','🚀'), rock.join('\n')||'_(No definido)_',
-    banner('Radar Inteligencia','🌍'), intel,
-    banner('Horóscopo (Libra)','🔮'), horo,
-    banner('Bonus Track','🎁'), bonus
-  ].join('\n\n');
+    Agenda:
+    ${ag.join('\n') || '—'}
+    Pendientes:
+    ${pend.join('\n') || '—'}
+    Big Rock:
+    ${rock.join('\n') || '—'}
+    `;
+    const analisis = await askGPT(promptCoach, 300, 0.65);
+
+    return [
+        '🗞️ *MORNING BRIEF ULTIMATE*',
+        `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
+        banner('Análisis Estratégico', '🧠'), analisis,
+        banner('Clima', '🌦️'), cl,
+        banner('Agenda', '📅'), ag.join('\n') || '_(Sin eventos)_',
+        banner('Pendientes Críticos', '🔥'), pend.join('\n') || '_(Sin pendientes)_',
+        banner('Tu Misión Principal (Big Rock)', '🚀'), rock.join('\n') || '_(No definido)_',
+        banner('Radar de Inteligencia Global', '🌍'), intel,
+        banner('Horóscopo (Libra)', '🔮'), horo,
+        banner('Bonus Track', '🎁'), bonus
+    ].join('\n\n');
 }
 
 /* ─── Command Router ───────────────────────────────────────────── */
@@ -483,32 +507,69 @@ async function router(msg){
   switch(cmd){
     case '/start':
     case '/help':
-      return '*JOYA* comandos:\n/brief /briefcompleto\n/addrock <t> /removerock <t>\n/addinteres <t> /removeinteres <t>';
+      return '*JOYA* comandos:\n/brief /briefcompleto\n/addrock <t> /removerock <t>\n/addinteres <t> /removeinteres <t>\n/status';
+    
     case '/brief':         return await briefShort();
     case '/briefcompleto': return await briefFull();
+    case '/status':        return await getSystemStatus(); // <-- NUEVO COMANDO
+    
     case '/addrock':       return arg?await addUnique('BigRocks',arg):'✏️ Falta texto';
     case '/removerock':    return arg?await removeRow('BigRocks',arg):'✏️ Falta texto';
     case '/addinteres':    return arg?await addUnique('Intereses',arg):'✏️ Falta texto';
     case '/removeinteres': return arg?await removeRow('Intereses',arg):'✏️ Falta texto';
-    default:               return '🤖 Comando desconocido. /help';
+    
+    default:               return '🤖 Comando desconocido. Usa /help';
   }
 }
 
 /* ─── Routes & Server ──────────────────────────────────────────── */
 app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
-  // ① Telegram recibe 200 enseguida ⇒ no marca error
+  // ① Responde 200 OK inmediatamente a Telegram
   res.sendStatus(200);
 
-  // ② Lógica asíncrona en segundo plano
+  // ② Ejecuta toda la lógica en segundo plano
   (async () => {
+    const msg = req.body.message;
     try {
-      const msg = req.body.message;
       if (msg?.text) {
-        const reply = await router(msg);           // genera respuesta
-        await sendTelegram(msg.chat.id, reply);    // envía al chat
+        const reply = await router(msg);
+        await sendTelegram(msg.chat.id, reply);
       }
     } catch (err) {
       console.error('Async webhook error:', err);
+      // --- MEJORA AÑADIDA: Notificación de error al admin ---
+      const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+      if (ADMIN_CHAT_ID) {
+        const errorMsg = `🔴 *Error Crítico en Asistente JOYA* 🔴\n\nComando: \`${msg.text}\`\n\nError: \`${err.message}\``;
+        await sendTelegram(ADMIN_CHAT_ID, errorMsg);
+      }
+      // --------------------------------------------------------
     }
-  })(); // ← se ejecuta sin bloquear la respuesta
+  })(); 
 });
+
+app.get('/healthz',(_,res)=>res.send('ok'));
+app.listen(PORT,()=>console.log(`🚀 Joya Ultimate on ${PORT}`));
+/* ─── Diagnóstico del Sistema ────────────────────────────────── */
+async function getSystemStatus() {
+    const checks = await Promise.allSettled([
+        // Prueba 1: Conexión básica con Google Sheets
+        sheetsClient().then(() => '✅ Google Sheets'),
+        // Prueba 2: Conexión básica con Google Calendar
+        calendarClient().then(() => '✅ Google Calendar'),
+        // Prueba 3: Conexión con OpenAI (pide una respuesta de 1 token)
+        askGPT('test', 1).then(r => r.includes('[') ? `❌ OpenAI (${r})` : '✅ OpenAI'),
+        // Prueba 4: Conexión con OpenWeather
+        weather().then(r => r.includes('disponible') ? `❌ OpenWeather` : '✅ OpenWeather')
+    ]);
+
+    const statusLines = checks.map(res => {
+        if (res.status === 'fulfilled') {
+            return res.value;
+        }
+        // Si una promesa falla, muestra el error de forma segura
+        return `❌ Error desconocido: ${res.reason.message.slice(0, 50)}`;
+    });
+    
+    return `*Estado del Sistema Asistente JOYA*\n──────────────\n${statusLines.join('\n')}`;
+}
