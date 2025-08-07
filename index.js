@@ -451,16 +451,26 @@ async function bonusTrack() {
 
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
-    const [cl, rock, ag, pend] = await Promise.all([weather(), bigRocks(), agenda(), pendientes()]);
-    return [
-        '⚡️ *Resumen Rápido*',
-        banner('Clima', '🌦️'), cl,
-        banner('Misión Principal', '🚀'), rock.length ? rock.join('\n') : '_(No definido)_',
-        banner('Focos Críticos', '🔥'), pend.length ? pend.join('\n') : '_(Sin pendientes)_',
-        banner('Agenda', '📅'), ag.length ? ag.join('\n') : '_(Sin eventos)_'
-    ].join('\n\n');
-}
+  // CORRECCIÓN: Usamos nombres de variables descriptivos y consistentes.
+  const [clima, bigRock, agenda, pendientes] = await Promise.all([
+    weather(), 
+    bigRocks(), 
+    agenda(), 
+    pendientes()
+  ]);
 
+  return [
+    '⚡️ *Resumen Rápido*',
+    banner('Clima', '🌦️'), 
+    clima,
+    banner('Misión Principal (Big Rock)', '🚀'), 
+    bigRock.length ? bigRock.join('\n') : '_(No definido)_',
+    banner('Focos Críticos (Pendientes)', '🔥'),
+    pendientes.length ? pendientes.join('\n') : '_(Sin pendientes)_',
+    banner('Agenda del Día', '📅'), 
+    agenda.length ? agenda.join('\n') : '_(Sin eventos)_'
+  ].join('\n\n');
+}
 async function briefFull() {
     await addWorkAgendaToPersonalCalendar(); // Sincroniza la agenda primero
 
