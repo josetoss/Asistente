@@ -14,6 +14,21 @@ const singleton = fn => {
   let inst;
   return (...args) => inst ?? (inst = fn(...args));
 };
+// ─── Google Sheets client ───────────────────────────────────────────
+const sheetsClient = singleton(async () => {
+  return google.sheets({
+    version: 'v4',
+    auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets'])
+  });
+});
+
+// ─── Google Calendar client ─────────────────────────────────────────
+const calendarClient = singleton(async () => {
+  return google.calendar({
+    version: 'v3',
+    auth: await googleClient(['https://www.googleapis.com/auth/calendar'])
+  });
+});
 
 // ───── POLYFILL fetch (Node 18 < 18.20) ───────────────────────────
 if (typeof globalThis.fetch !== 'function') {
@@ -437,43 +452,76 @@ async function askGemini(prompt, max_tokens = 300, temperature = 0.6) {
     }
 }
 
-// 3. **Finalmente**, define la función unificadora `askAI`
-async function askAI(prompt, max_tokens, temperature) {
-    const [responseGemini, responseGPT] = await Promise.all([
-        askGemini(prompt, max_tokens, temperature),
-        askGPT(prompt, max_tokens, temperature),
-    ]);
+// ─── Helper opcional: timeout para llamadas a IA ───────────────────────────
+const withTimeout = (promise, ms, label = 'AI') =>
+  Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timeout after ${ms}ms`)), ms))
+  ]);
 
-    // Si ambos fallan, devolvemos un mensaje de error
-    if (responseGemini.startsWith('[Gemini error') && responseGPT.startsWith('[GPT error')) {
-        return `[Error de IA: Ambos modelos fallaron]`;
-    }
+// ─── askAI (modo paralelo con conciliación y preferencia) ──────────────────
+// Usa AI_MODEL = 'gemini' o 'gpt' (env var) para decidir quién concilia.
+// Llama a ambos en paralelo; si uno falla, usa el otro; si ambos responden, concilia.
+async function askAI(prompt, max_tokens = 300, temperature = 0.6) {
+  const prefer = (process.env.AI_MODEL || 'gemini').toLowerCase();
 
-    // Si uno de los modelos falla, simplemente usa la respuesta del otro.
-    if (responseGemini.startsWith('[Gemini error')) {
-        return `(Usando solo GPT)\n\n${responseGPT}`;
-    }
-    if (responseGPT.startsWith('[GPT error')) {
-        return `(Usando solo Gemini)\n\n${responseGemini}`;
-    }
+  // 1) Ejecutar ambos modelos en paralelo con timeout suave
+  const [resultGemini, resultGPT] = await Promise.allSettled([
+    withTimeout(askGemini(prompt, max_tokens, temperature), 12000, 'Gemini'),
+    withTimeout(askGPT(prompt, max_tokens, temperature),   12000, 'GPT')
+  ]);
 
-    // Si ambos responden, usa uno de ellos para conciliar las respuestas.
-    const reconciliationPrompt = `
-      Eres un editor experto. Has recibido dos borradores para el mismo prompt.
-      Combina las siguientes dos respuestas en una sola, concisa, y fluida.
-      Mantén la información más relevante y el tono profesional.
-      ---
-      Respuesta 1 (Gemini):
-      ${responseGemini}
-      ---
-      Respuesta 2 (GPT):
-      ${responseGPT}
-    `;
+  // 2) Normalizar resultados (string con posible "[... error ...]" si falló)
+  const responseGemini =
+    resultGemini.status === 'fulfilled'
+      ? resultGemini.value
+      : `[Gemini error: ${resultGemini.reason?.message || 'Promise rejected'}]`;
 
-    // Usa el modelo principal para la conciliación.
-    const finalResponse = await askGemini(reconciliationPrompt, max_tokens, 0.5);
-    return finalResponse;
+  const responseGPT =
+    resultGPT.status === 'fulfilled'
+      ? resultGPT.value
+      : `[GPT error: ${resultGPT.reason?.message || 'Promise rejected'}]`;
+
+  const geminiFailed = typeof responseGemini === 'string' && responseGemini.startsWith('[Gemini error');
+  const gptFailed    = typeof responseGPT   === 'string' && responseGPT.startsWith('[GPT error');
+
+  // Caso A: ambos fallan
+  if (geminiFailed && gptFailed) {
+    return `[Error de IA] ${responseGemini} | ${responseGPT}`;
+  }
+
+  // Caso B: solo uno falla → usa el que sirvió
+  if (geminiFailed) return responseGPT;
+  if (gptFailed)    return responseGemini;
+
+  // Caso C: ambos respondieron → conciliar con el preferido
+  const reconciliationPrompt = `
+Eres un editor experto. Has recibido dos borradores para el mismo prompt.
+Combina las siguientes dos respuestas en una sola, concisa y fluida.
+Mantén la información más relevante y el tono profesional.
+---
+Respuesta 1 (Gemini):
+${responseGemini}
+---
+Respuesta 2 (GPT):
+${responseGPT}
+`.trim();
+
+  const reconciled =
+    prefer === 'gpt'
+      ? await askGPT(reconciliationPrompt, max_tokens, 0.5)
+      : await askGemini(reconciliationPrompt, max_tokens, 0.5);
+
+  // Si la conciliación falla, devuelve la respuesta del modelo preferido
+  const reconFailed = typeof reconciled === 'string' &&
+    (reconciled.startsWith('[Gemini error') || reconciled.startsWith('[GPT error'));
+
+  if (reconFailed) {
+    return prefer === 'gpt' ? responseGPT : responseGemini;
+  }
+  return reconciled;
 }
+
 /* ─── Radar Inteligencia Global ───────────────────────────────── */
 async function intelGlobal() {
   const key='intelGlobal';
