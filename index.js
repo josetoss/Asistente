@@ -495,15 +495,20 @@ async function router(msg){
 }
 
 /* ─── Routes & Server ──────────────────────────────────────────── */
-app.post(`/webhook/${TELEGRAM_SECRET}`, async (req,res)=>{
-  try{
-    if(req.body.message?.text){
-      await sendTelegram(req.body.message.chat.id, await router(req.body.message));
+app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
+  // ① Telegram recibe 200 enseguida ⇒ no marca error
+  res.sendStatus(200);
+
+  // ② Lógica asíncrona en segundo plano
+  (async () => {
+    try {
+      const msg = req.body.message;
+      if (msg?.text) {
+        const reply = await router(msg);           // genera respuesta
+        await sendTelegram(msg.chat.id, reply);    // envía al chat
+      }
+    } catch (err) {
+      console.error('Async webhook error:', err);
     }
-    res.sendStatus(200);
-  }catch(e){ console.error('Webhook:',e); res.sendStatus(500);}
+  })(); // ← se ejecuta sin bloquear la respuesta
 });
-
-app.get('/healthz',(_,res)=>res.send('ok'));
-
-app.listen(PORT,()=>console.log(`🚀 Joya Ultimate corriendo en ${PORT}`));
