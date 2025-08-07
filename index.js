@@ -79,27 +79,23 @@ const fetchSafe = (url, ms = 3000) =>
 
 // ─── Google Auth Singleton con validación de JSON ────────────
 const googleClient = singleton(async (scopes) => {
-  // 1. Leer credenciales crudas (JSON o Base64)
-  const raw = GOOGLE_CREDENTIALS ||
-    (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
-  if (!raw) {
-    throw new Error('❌ Debes definir GOOGLE_CREDENTIALS o GOOGLE_CREDENTIALS_B64 en las vars de entorno');
-  }
-
-  // 2. Intentar parsear
-  let creds;
-  try {
-    creds = JSON.parse(raw);
-  } catch (err) {
-    console.error('❌ Falló JSON.parse de GOOGLE_CREDENTIALS:', raw);
-    throw new Error('Credenciales de Google inválidas: JSON mal formado');
-  }
-
-  // 3. Crear y devolver el cliente autenticado
-  return new google.auth.GoogleAuth({
-    credentials: creds,
-    scopes
-  }).getClient();
+  const raw = GOOGLE_CREDENTIALS ||
+    (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
+  if (!raw) {
+    throw new Error('❌ Debes definir GOOGLE_CREDENTIALS o GOOGLE_CREDENTIALS_B64 en las vars de entorno');
+  }
+  let creds;
+  try {
+    creds = JSON.parse(raw);
+  } catch (err) {
+    console.error('❌ Falló JSON.parse de GOOGLE_CREDENTIALS:', raw);
+    throw new Error('Credenciales de Google inválidas: JSON mal formado');
+  }
+  const auth = new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: scopes
+  });
+  return auth.getClient();
 });
 
 /* ─── Telegram helper ───────────────────────────────────────────── */
