@@ -26,6 +26,7 @@ const {
   TELEGRAM_SECRET,
   OPENWEATHER_API_KEY,
   OPENAI_API_KEY,
+  GEMINI_API_KEY,
   NINJAS_KEY,
   CIUDAD_CLIMA = 'Santiago,cl',
   DASHBOARD_SPREADSHEET_ID,
@@ -57,27 +58,31 @@ const fetchSafe = (url, ms = 3000) =>
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
   ]).catch(() => null);
 
-/* ─── Google Auth Singletons ────────────────────────────────────── */
-const singleton = fn => { let inst; return (...args) => inst ?? (inst = fn(...args)); };
-
-const googleClient = singleton(async scopes => {
+// ─── Google Auth Singleton con validación de JSON ─────────────────────────────────
+const googleClient = singleton(async (scopes) => {
+  // 1. Leer credenciales crudas (JSON o Base64)
   const raw = GOOGLE_CREDENTIALS ||
     (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
-  if (!raw) throw new Error('❌ GOOGLE_CREDENTIALS(_B64) faltante');
-  return new google.auth.GoogleAuth({ credentials: JSON.parse(raw), scopes }).getClient();
+  if (!raw) {
+    throw new Error('❌ Debes definir GOOGLE_CREDENTIALS o GOOGLE_CREDENTIALS_B64 en las vars de entorno');
+  }
+
+  // 2. Intentar parsear
+  let creds;
+  try {
+    creds = JSON.parse(raw);
+  } catch (err) {
+    console.error('❌ Falló JSON.parse de GOOGLE_CREDENTIALS:', raw);
+    throw new Error('Credenciales de Google inválidas: JSON mal formado');
+  }
+
+  // 3. Crear y devolver el cliente autenticado
+  return new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes
+  }).getClient();
 });
 
-const sheetsClient = singleton(async () =>
-  google.sheets({ version:'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
-);
-
-const calendarClient = singleton(async () =>
-  google.calendar({
-    version: 'v3',
-    auth: await googleClient([
-      'https://www.googleapis.com/auth/calendar', // Use this broader scope
-    ])
-  }));
 
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
