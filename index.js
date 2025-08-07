@@ -4,11 +4,11 @@
  * ║        Node 18 (ESM) — preparado para Render PaaS             ║
  * ╚════════════════════════════════════════════════════════════════╝ */
 
-import express                    from 'express';
-import NodeCache                  from 'node-cache';
-import { google }                 from 'googleapis';
-import { DateTime }               from 'luxon';
-import { XMLParser }              from 'fast-xml-parser';
+import express  from 'express';
+import NodeCache from 'node-cache';
+import { google } from 'googleapis';
+import { DateTime } from 'luxon';
+import { XMLParser } from 'fast-xml-parser';
 
 /* ─── ENV ───────────────────────────────────────────────────────── */
 const {
@@ -18,7 +18,7 @@ const {
   OPENWEATHER_API_KEY,
   OPENAI_API_KEY,
   NINJAS_KEY,
-  CIUDAD_CLIMA             = 'Santiago,cl',
+  CIUDAD_CLIMA = 'Santiago,cl',
   DASHBOARD_SPREADSHEET_ID,
   GOOGLE_CREDENTIALS,
   GOOGLE_CREDENTIALS_B64
@@ -26,31 +26,39 @@ const {
 
 if (!TELEGRAM_SECRET || !TELEGRAM_BOT_TOKEN)
   throw new Error('Faltan TELEGRAM_SECRET y/o TELEGRAM_BOT_TOKEN');
-
 if (!DASHBOARD_SPREADSHEET_ID)
   console.warn('⚠️  DASHBOARD_SPREADSHEET_ID no definido — funciones de Sheets fallarán');
 
 /* ─── Express & caché ───────────────────────────────────────────── */
 const app   = express();
 app.use(express.json({ limit: '1mb' }));
-const cache = new NodeCache({ stdTTL: 300 });          // 5 min
+const cache = new NodeCache({ stdTTL: 300 });
 const TELE_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const banner   = (t, e) => `\n${e} *${t}*\n──────────────`;
 const escapeMd = s => (s || '').replace(/([\\_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
 
+/* ─── helper seguro (timeout + catch) ───────────────────────────── */
+const fetchSafe = (url, ms = 3000) =>
+  Promise.race([
+    fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }).then(r => r.text()),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ]).catch(() => null);                                    // -> null si falla
+
 /* ─── Google Auth (singletons) ──────────────────────────────────── */
 const singleton = fn => { let i; return (...a) => i ?? (i = fn(...a)); };
 
-const googleClient = singleton(async (scopes) => {
+const googleClient = singleton(async scopes => {
   const raw = GOOGLE_CREDENTIALS ||
               (GOOGLE_CREDENTIALS_B64 &&
-              Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
+               Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
   if (!raw) throw new Error('GOOGLE_CREDENTIALS(_B64) faltante');
   return new google.auth.GoogleAuth({ credentials: JSON.parse(raw), scopes }).getClient();
 });
 
-const sheetsClient   = singleton(async () => google.sheets  ({ version: 'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) }));
-const calendarClient = singleton(async () => google.calendar({ version: 'v3', auth: await googleClient(['https://www.googleapis.com/auth/calendar.readonly']) }));
+const sheetsClient   = singleton(async () =>
+  google.sheets({ version: 'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) }));
+const calendarClient = singleton(async () =>
+  google.calendar({ version: 'v3', auth: await googleClient(['https://www.googleapis.com/auth/calendar.readonly']) }));
 
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
@@ -65,7 +73,7 @@ async function sendTelegram(chatId, txt) {
   }
 }
 
-/* ─── OpenWeather: clima min/max de hoy ─────────────────────────── */
+/* ─── OpenWeather ──────────────────────────────────────────────── */
 async function cityCoords(city) {
   const k = `coords_${city}`; if (cache.has(k)) return cache.get(k);
   if (!OPENWEATHER_API_KEY) return null;
@@ -73,7 +81,7 @@ async function cityCoords(city) {
   const [d] = await fetch(url).then(r => r.json()).catch(() => []);
   if (!d) return null;
   const coords = { lat: d.lat, lon: d.lon };
-  cache.set(k, coords, 86400);                    // 24 h
+  cache.set(k, coords, 86400);
   return coords;
 }
 
@@ -88,12 +96,12 @@ async function weather() {
   const max    = Math.round(Math.max(...hits.map(i => i.main.temp_max)));
   const desc   = hits[Math.floor(hits.length / 2)].weather[0].description;
   const out    = `📉 Mín: ${min}°C · 📈 Máx: ${max}°C · ${desc[0].toUpperCase()}${desc.slice(1)}`;
-  cache.set(k, out, 10800);                       // 3 h
+  cache.set(k, out, 10800);
   return out;
 }
 
-/* ─── Sheets util ───────────────────────────────────────────────── */
-const col = async (s, c='A') =>
+/* ─── Sheets utils ─────────────────────────────────────────────── */
+const col = async (s, c = 'A') =>
   await sheetsClient().then(gs => gs.spreadsheets.values.get({
     spreadsheetId: DASHBOARD_SPREADSHEET_ID, range: `${s}!${c}:${c}`
   })).then(r => r.data.values?.flat() || []);
@@ -104,7 +112,7 @@ const append = async (s, row) =>
     valueInputOption:'USER_ENTERED', resource:{ values:[row] }
 }));
 
-const sheetId = singleton(async (name) => {
+const sheetId = singleton(async name => {
   const meta = await sheetsClient().then(gs => gs.spreadsheets.get({
     spreadsheetId: DASHBOARD_SPREADSHEET_ID, fields: 'sheets.properties'
   }));
@@ -115,52 +123,42 @@ const sheetId = singleton(async (name) => {
 
 async function addUnique(sheet, text) {
   if ((await col(sheet)).some(v => v?.toLowerCase() === text.toLowerCase()))
-    return `ℹ️ \"${text}\" ya existe en \"${sheet}\".`;
-  await append(sheet, [text]); return `✅ Agregado a \"${sheet}\": ${text}`;
+    return `ℹ️ "${text}" ya existe en "${sheet}".`;
+  await append(sheet, [text]);
+  return `✅ Agregado a "${sheet}": ${text}`;
 }
 
 async function removeRow(sheet, text) {
   try {
-    const c = await col(sheet);
-    const idx = c.findIndex(v => v?.toLowerCase?.() === text.toLowerCase());
+    const values = await col(sheet);
+    const idx = values.findIndex(v => v?.toLowerCase?.() === text.toLowerCase());
+    if (idx === -1) return `ℹ️ No se encontró "${text}" en "${sheet}".`;
 
-    if (idx === -1) {
-      return `ℹ️ No se encontró "${text}" en "${sheet}".`;
-    }
-
-    // --- LA CORRECCIÓN ESTÁ AQUÍ ---
-    // 1. Obtenemos el cliente y el ID de la hoja ANTES de construir el objeto de la petición.
     const gs = await sheetsClient();
-    const idDeLaHoja = await sheetId(sheet);
-
-    // 2. Ahora construimos el objeto usando la variable, sin 'await' adentro.
     await gs.spreadsheets.batchUpdate({
       spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-      requestBody: {
-        requests: [{
-          deleteDimension: {
-            range: {
-              sheetId: idDeLaHoja, // <-- Usamos la variable
-              dimension: 'ROWS',
-              startIndex: idx,
-              endIndex: idx + 1
-            }
-          }
-        }]
-      }
+      requestBody: { requests: [{
+        deleteDimension: { range: {
+          sheetId : await sheetId(sheet),
+          dimension: 'ROWS',
+          startIndex: idx,
+          endIndex  : idx + 1
+        }}
+      }]}
     });
-
     return `🗑️ Eliminado de "${sheet}": ${text}`;
   } catch (e) {
-    console.error(`Error en removeRow para "${sheet}":`, e.message);
-    return `❌ Error al intentar eliminar de "${sheet}".`;
+    console.error('removeRow:', e.message);
+    return `❌ Error al eliminar en "${sheet}".`;
   }
 }
 
-/* Big Rocks */
-const bigRocks = async () => { const k='bigR'; if(cache.has(k)) return cache.get(k); const list=(await col('BigRocks')).filter(Boolean).map(t=>'• '+t.trim()); cache.set(k,list,120); return list; };
+const bigRocks = async () => {
+  const k='bigR'; if(cache.has(k)) return cache.get(k);
+  const list=(await col('BigRocks')).filter(Boolean).map(t=>'• '+t.trim());
+  cache.set(k,list,120); return list;
+};
 
-/* Pendientes Top-5 */
 async function pendientes() {
   const k='pend'; if(cache.has(k)) return cache.get(k);
   const rows = await sheetsClient().then(gs => gs.spreadsheets.values.get({
@@ -178,10 +176,11 @@ async function pendientes() {
     .sort((a,b)=> (b.atras-a.atras)||(b.score-a.score))
     .slice(0,5)
     .map(p => `${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
-  cache.set(k,list,120); return list;
+
+  cache.set(k,list,120);
+  return list;
 }
 
-/* Agenda hoy (todos los calendarios) */
 async function agenda() {
   const k='agenda'; if(cache.has(k)) return cache.get(k);
   const cal = await calendarClient();
@@ -189,121 +188,94 @@ async function agenda() {
   const now = DateTime.local().setZone(tz);
   const end = now.endOf('day');
 
-  const metas    = await cal.calendarList.list();
-  const events   = (await Promise.all(
-      metas.data.items.map(c => cal.events.list({
-        calendarId:c.id,timeMin:now.toISO(),timeMax:end.toISO(),
-        singleEvents:true,orderBy:'startTime'
-      }))
-    )).flatMap(r=>r.data.items||[])
-      .sort((a,b)=>new Date(a.start.dateTime||a.start.date)-new Date(b.start.dateTime||b.start.date))
-      .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
-      .map(e=>`• ${e.start.dateTime?DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm'):'Todo el día'} – ${e.summary||'(sin título)'}`);
+  const metas  = await cal.calendarList.list();
+  const events = (await Promise.all(
+    metas.data.items.map(c => cal.events.list({
+      calendarId:c.id,timeMin:now.toISO(),timeMax:end.toISO(),
+      singleEvents:true,orderBy:'startTime'
+    }))
+  )).flatMap(r=>r.data.items||[])
+    .sort((a,b)=>new Date(a.start.dateTime||a.start.date)-new Date(b.start.dateTime||b.start.date))
+    .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
+    .map(e=>`• ${e.start.dateTime?DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm'):'Todo el día'} – ${e.summary||'(sin título)'}`);
 
-  cache.set(k,events,300); return events;
+  cache.set(k,events,300);
+  return events;
 }
 
-/* ─── GPT helper ─────────────────────────────────────────────────── */
-async function askGPT(prompt, tok = 300, temp = 0.6) {
+/* ─── GPT helper ────────────────────────────────────────────────── */
+async function askGPT(prompt, tok=300, temp=0.6){
   if (!OPENAI_API_KEY) return '[OPENAI_API_KEY faltante]';
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method : 'POST',
-    headers: { 'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}` },
-    body   : JSON.stringify({ model:'gpt-4o-mini', messages:[{role:'user',content:prompt}], max_tokens:tok, temperature:temp })
+  const r = await fetch('https://api.openai.com/v1/chat/completions',{
+    method:'POST',
+    headers:{ 'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}` },
+    body:JSON.stringify({ model:'gpt-4o-mini', messages:[{role:'user',content:prompt}], max_tokens:tok, temperature:temp })
   });
-  if (!r.ok) { console.error('GPT:', r.statusText); return `[GPT error: ${r.statusText}]`; }
+  if(!r.ok){ console.error('GPT:',r.statusText); return `[GPT error: ${r.statusText}]`; }
   return (await r.json()).choices?.[0]?.message?.content?.trim() || '[GPT vacío]';
 }
 
 /* ─── Intereses & Radar de Inteligencia ─────────────────────────── */
-const getIntereses = async () => { const k='inter'; if(cache.has(k)) return cache.get(k); const list=(await col('Intereses')).slice(1).filter(Boolean).map(t=>t.trim()); cache.set(k,list,600); return list; };
+const getIntereses = async () => {
+  const k='inter'; if(cache.has(k)) return cache.get(k);
+  const list=(await col('Intereses')).slice(1).filter(Boolean).map(t=>t.trim());
+  cache.set(k,list,600); return list;
+};
 
 async function intelGlobal() {
   const k='intel'; if(cache.has(k)) return cache.get(k);
 
-  /* 1.  leer feeds */
   const FEEDS = [
-    // === GEOPOLÍTICA Y RELACIONES INTERNACIONALES (NÚCLEO) ===
-    'https://warontherocks.com/feed/',          // War on the Rocks
-    'https://www.foreignaffairs.com/rss.xml',   // Foreign Affairs
-    'https://www.cfr.org/rss.xml',              // Council on Foreign Relations
-    'https://carnegieendowment.org/rss/all-publications', // Carnegie Endowment
-    'https://www.csis.org/rss/analysis',        // CSIS
-    'https://www.rand.org/pubs.rss',            // RAND Corporation
-    'https://www.brookings.edu/feed/',          // Brookings Institution
-    'https://globalvoices.org/feed/',           // Global Voices
-    'https://thediplomat.com/feed/',            // The Diplomat (Asia-Pacific)
-    'https://www.foreignpolicy.com/feed',      // Foreign Policy
+    'https://warontherocks.com/feed/','https://www.foreignaffairs.com/rss.xml',
+    'https://www.cfr.org/rss.xml','https://carnegieendowment.org/rss/all-publications',
+    'https://www.csis.org/rss/analysis','https://www.rand.org/pubs.rss',
+    'https://globalvoices.org/feed/','https://thediplomat.com/feed/',
+    'https://www.foreignpolicy.com/feed',
 
-    // === TECNOLOGÍA Y CIBERSEGURIDAD ===
-    'https://www.wired.com/feed/rss',
-    'https://feeds.arstechnica.com/arstechnica/index',
-    'https://www.theverge.com/rss/index.xml',
-    'http://feeds.feedburner.com/TechCrunch/',
-    'https://www.technologyreview.com/feed/',
-    'https://restofworld.org/feed/latest/',
-    'https://themarkup.org/feeds/rss.xml',
-    'https://www.schneier.com/feed/atom/',       // Schneier on Security
-    'https://krebsonsecurity.com/feed/',        // Krebs on Security
-    'https://thehackernews.com/feeds/posts/default', // The Hacker News
-    'https://darknetdiaries.com/podcast.xml',   // Darknet Diaries (Podcast)
+    'https://www.wired.com/feed/rss','https://feeds.arstechnica.com/arstechnica/index',
+    'https://www.theverge.com/rss/index.xml','http://feeds.feedburner.com/TechCrunch/',
+    'https://www.technologyreview.com/feed/','https://restofworld.org/feed/latest/',
+    'https://themarkup.org/feeds/rss.xml','https://www.schneier.com/feed/atom/',
+    'https://krebsonsecurity.com/feed/','https://thehackernews.com/feeds/posts/default',
+    'https://darknetdiaries.com/podcast.xml',
 
-    // === NEGOCIOS Y ESTRATEGIA ===
-    'https://stratechery.com/feed/',            // Stratechery by Ben Thompson
-    'https://hbr.org/rss',                      // Harvard Business Review
-    'https://www.ben-evans.com/rss',            // Benedict Evans
+    'https://stratechery.com/feed/','https://hbr.org/rss','https://www.ben-evans.com/rss',
 
-    // === CIENCIA Y FUTURO ===
-    'https://nautil.us/feed/',                  // Nautilus
-    'https://www.quantamagazine.org/feed/',     // Quanta Magazine
-    'https://singularityhub.com/feed/',          // Singularity Hub
+    'https://nautil.us/feed/','https://www.quantamagazine.org/feed/','https://singularityhub.com/feed/',
 
-    // === NOTICIAS GLOBALES (AGENCIAS Y MEDIOS PRINCIPALES) ===
-    'https://rss.nytimes.com/services/xml/rss/nyt/World.xml', // New York Times - World
-    'https://feeds.bbci.co.uk/news/world/rss.xml', // BBC News - World
-    'https://www.theguardian.com/world/rss',    // The Guardian - World
-    'https://www.reuters.com/tools/rss',        // Reuters - Top News
-    'https://www.economist.com/rss',            // The Economist
-    'https://www.theatlantic.com/feed/all/',    // The Atlantic
-    'https://www.aljazeera.com/xml/rss/all.xml', // Al Jazeera
+    'https://rss.nytimes.com/services/xml/rss/nyt/World.xml','https://feeds.bbci.co.uk/news/world/rss.xml',
+    'https://www.theguardian.com/world/rss','https://www.reuters.com/tools/rss',
+    'https://www.economist.com/rss','https://www.theatlantic.com/feed/all/','https://www.aljazeera.com/xml/rss/all.xml',
 
-    // === ECONOMÍA Y FINANZAS ===
-    'https://www.ft.com/?format=rss',           // Financial Times
-    'https://feeds.a.dj.com/rss/RSSWorldNews.xml', // Wall Street Journal - World News
-    'https://www.bloomberg.com/opinion/authors/A_1iP-c2o8I/matthew-a-levine.rss', // Matt Levine's Money Stuff
+    'https://www.ft.com/?format=rss','https://feeds.a.dj.com/rss/RSSWorldNews.xml',
+    'https://www.bloomberg.com/opinion/authors/A_1iP-c2o8I/matthew-a-levine.rss',
 
-    // === REDDIT (PULSO DE LA COMUNIDAD) ===
-    'https://www.reddit.com/r/worldnews/.rss',
-    'https://www.reddit.com/r/geopolitics/.rss',
-    'https://www.reddit.com/r/technology/.rss',
-    'https://www.reddit.com/r/cybersecurity/.rss',
+    'https://www.reddit.com/r/worldnews/.rss','https://www.reddit.com/r/geopolitics/.rss',
+    'https://www.reddit.com/r/technology/.rss','https://www.reddit.com/r/cybersecurity/.rss',
     'https://www.reddit.com/r/Futurology/.rss',
-    
-    // === EN ESPAÑOL (ANÁLISIS) ===
-    'https://feeds.weblogssl.com/xataka2',      // Xataka
-    'https://elordenmundial.com/feed/',         // El Orden Mundial
-    'https://es.globalvoices.org/feed/',         // Global Voices en Español
-    ];
-   const parser   = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
-  const xmlTexts = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
 
+    'https://feeds.weblogssl.com/xataka2','https://elordenmundial.com/feed/','https://es.globalvoices.org/feed/'
+  ];
+
+  const parser   = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
+  const xmlTexts = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
   if (!xmlTexts.length) return 'No se pudo acceder a los feeds de noticias hoy.';
 
   const items = xmlTexts.flatMap(x => {
     const f = parser.parse(x);
     return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
-  }).slice(0, 40);
+  }).slice(0,40);
 
-  const headlines = items.map((it, i) => ({
-    id   : i + 1,
-    title: it.title,
-    link : typeof it.link === 'string' ? it.link : it.link?.['@_href']
+  const headlines = items.map((it,i)=>({
+    id:i+1,
+    title:it.title,
+    link:typeof it.link==='string'?it.link:it.link?.['@_href']
   }));
 
   const intereses = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
-  const promptIntel = `
-👁️ Eres analista senior. Intereses: ${intereses}
-Formato obligatorio:
+  const prompt = `
+👁️ Analista senior. Intereses: ${intereses}
+FORMATO:
 ◼️ *<Categoría>*
 » **Titular N°X** — 2-3 líneas
    • Oportunidad → …
@@ -311,145 +283,152 @@ Formato obligatorio:
    • Implicancia para Chile → …
    • [Fuente X]
 
-Elige 4 titulares.
+Escoge 4 titulares.
 Titulares:
-${headlines.map(h => `${h.id}: ${h.title}`).join('\n')}
+${headlines.map(h=>`${h.id}: ${h.title}`).join('\n')}
   `;
 
-  let texto = await askGPT(promptIntel, 700, 0.7);
-  headlines.forEach(h => {
-    texto = texto.replace(`[Fuente ${h.id}]`, `[Ver fuente](${h.link})`);
+  let texto = await askGPT(prompt,700,0.7);
+  headlines.forEach(h=>{
+    texto = texto.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
   });
 
-  cache.set(k, texto, 3600);
+  cache.set(k,texto,3600);
   return texto;
 }
 
-  /* 2.  prompt IA mejorado */
-  const intereses = (await getIntereses()).join(', ') || 'geopolítica y tecnología';
-  const promptIntel = `
-👁️ Eres un analista senior de inteligencia para un alto ejecutivo.
-• Intereses clave: ${intereses}
-• Idioma: ESPAÑOL.
-• FORMATO:
-
-◼️ *<Categoría>*  
-» **Titular N°X** — (2-3 líneas de impacto)  
-   • Oportunidad → …  
-   • Riesgo      → …  
-   • Implicancia para **Chile** → …  
-   • [Fuente X]
-
-Escoge **4** titulares de la lista.  Brevedad incisiva, sin introducción ni conclusión.
-
-Titulares:
-${heads.map(h=>`${h.id}: ${h.title}`).join('\n')}
-`;
-
-  let txt = await askGPT(promptIntel, 700, 0.7);
-  heads.forEach(h => { txt = txt.replace(`[Fuente ${h.id}]`, `[Ver fuente](${h.link})`); });
-
-  cache.set(k,txt,3600);
-  return txt;
-}
-
-/* ─── Horóscopo mega-fusion ─────────────────────────────────────── */
+/* ─── Horóscopo ─────────────────────────────────────────────────── */
 async function horoscopo() {
-  const k='horosc'; if(cache.has(k)) return cache.get(k);
+  const k='horo'; if(cache.has(k)) return cache.get(k);
 
   const fuentes = await Promise.allSettled([
-    fetch('https://aztro.sameerkumar.website/?sign=libra&day=today',{method:'POST'}).then(r=>r.json()).then(d=>d.description).catch(()=>null),
-    (async()=>{ if(!NINJAS_KEY) return null; try{ const d=await fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra',{headers:{'X-Api-Key':NINJAS_KEY}}).then(r=>r.json()); return d.horoscope; }catch{return null;} })(),
+    fetchSafe('https://aztro.sameerkumar.website/?sign=libra&day=today').then(t=>t&&JSON.parse(t).description),
+    NINJAS_KEY
+      ? fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra',{headers:{'X-Api-Key':NINJAS_KEY}})
+          .then(r=>r.json()).then(d=>d.horoscope).catch(()=>null)
+      : null,
     askGPT('Horóscopo Libra global (3 líneas, español).',120,0.7),
     askGPT('Horóscopo Libra carrera/finanzas (3 líneas, español).',120,0.7),
     askGPT('Horóscopo Libra bienestar personal (3 líneas, español).',120,0.8)
   ]);
 
-  const borradores = fuentes.filter(f=>f.status==='fulfilled'&&f.value).map(f=>f.value).join('\n\n');
+  const borradores = fuentes.filter(f=>f.status==='fulfilled'&&f.value)
+                            .map(f=>f.value).join('\n\n');
+  if (!borradores) return 'Horóscopo no disponible.';
+
   const prompt = `
-Eres astrólogo maestro. Sintetiza los siguientes borradores en UN solo horóscopo unificado (4-5 líneas) en español.  
-Incluye primero un titular en negrita. Luego el mensaje.  
-Borradores:  
+Eres astrólogo maestro. Sintetiza los siguientes borradores en UN solo horóscopo (titular en negrita + 4-5 líneas), español:
+
 ${borradores}
   `;
   const final = await askGPT(prompt,250,0.6);
-  cache.set(k,final,21600);      // 6 h
+  cache.set(k,final,21600);
   return final;
 }
 
-/* ─── Bonus Track ───────────────────────────────────────────────── */
+/* ─── Bonus Track reforzado ─────────────────────────────────────── */
 async function bonusTrack() {
-  const k='bonus'; if(cache.has(k)) return cache.get(k);
+  const k = 'bonus';
+  if (cache.has(k)) return cache.get(k);
 
+  /* ① Fuentes (RSS) */
   const FEEDS = [
-    // === Filosofía, Cultura y Ensayos (Similares a Aeon) ===
+    // — Filosofía, cultura, ensayo —
     'https://aeon.co/feed.rss',
     'https://psyche.co/feed',
     'https://www.noemamag.com/feed/',
     'https://longnow.org/ideas/feed/',
-    'https://www.the-tls.co.uk/feed/', // The Times Literary Supplement
-    'https://laphamsquarterly.org/rss.xml', // Lapham's Quarterly
-    'https://www.nybooks.com/feed/', // The New York Review of Books
-    'https://thepointmag.com/feed/', // The Point Magazine
-    'https://thebaffler.com/feed', // The Baffler
+    'https://www.the-tls.co.uk/feed/',
+    'https://laphamsquarterly.org/rss.xml',
+    'https://www.nybooks.com/feed/',
+    'https://thepointmag.com/feed/',
+    'https://thebaffler.com/feed',
     'https://quillette.com/feed/',
     'https://palladiummag.com/feed/',
 
-    // === Ciencia y Tecnología (Profundo) ===
-    'https://nautil.us/feed/', // Nautilus
-    'https://www.quantamagazine.org/feed/', // Quanta Magazine
-    'https://www.technologyreview.com/feed/', // MIT Technology Review
-    'https://arstechnica.com/science/feed/', // Ars Technica (Science Section)
-    'https://www.wired.com/feed/category/science/latest/rss', // WIRED (Science)
-    'https://stratechery.com/feed/', // Stratechery by Ben Thompson (Tech Analysis)
-    'https://knowingneurons.com/feed/', // Neuroscience
+    // — Ciencia & tecnología profunda —
+    'https://nautil.us/feed/',
+    'https://www.quantamagazine.org/feed/',
+    'https://www.technologyreview.com/feed/',
+    'https://arstechnica.com/science/feed/',
+    'https://www.wired.com/feed/category/science/latest/rss',
+    'https://stratechery.com/feed/',
+    'https://knowingneurons.com/feed/',
 
-    // === Curiosidades Intelectuales y Cultura General ===
-    'https://longreads.com/feed/', // Longreads
-    'https://getpocket.com/explore/rss', // Pocket's "Must-Reads"
-    'https://publicdomainreview.org/feed/', // The Public Domain Review
-    'https://daily.jstor.org/feed/', // JSTOR Daily
+    // — Curiosidades intelectuales —
+    'https://longreads.com/feed/',
+    'https://getpocket.com/explore/rss',
+    'https://publicdomainreview.org/feed/',
+    'https://daily.jstor.org/feed/',
     'https://bigthink.com/feed/',
-    'https://sidebar.io/feed.xml', // 5 mejores artículos de diseño y tecnología del día
+    'https://sidebar.io/feed.xml',
 
-    // === En Español de Alta Calidad ===
+    // — Alta calidad en español —
     'https://elgatoylacaja.com/feed/',
-        'https://ethic.es/feed/',
+    'https://ethic.es/feed/',
     'https://principia.io/feed/',
-    'https://ctxt.es/es/rss.xml' // CTXT
-
+    'https://ctxt.es/es/rss.xml',
+    'https://elpais.com/rss/cultura.xml',
+    'https://hipertextual.com/feed',
+    'https://www.bbvaopenmind.com/en/feed/'           // ciencia & humanidades
   ];
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
-  const xmls   = await Promise.all(FEEDS.map(u=>fetch(u).then(r=>r.text())));
-  const items  = xmls.flatMap(x=>{ const f=parser.parse(x); return f.rss?f.rss.channel.item:f.feed?f.feed.entry:[]; });
-  const pick   = items[Math.floor(Math.random()*Math.min(items.length,15))];
-  const art    = { title: pick.title, link: typeof pick.link==='string'?pick.link:pick.link?.['@_href'] };
 
- const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
-  const xmls   = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+  /* ② Descarga segura de cada RSS (usa fetchSafe) */
+  const parser  = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+  const xmlList = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+  if (!xmlList.length) return 'No hay artículos disponibles hoy.';
 
-  if (!xmls.length) return 'No hay artículos disponibles hoy.';
-
-  const items  = xmls.flatMap(x => {
-    const f = parser.parse(x);
+  /* ③ Junta los ítems y barájalos */
+  const items = xmlList.flatMap(xml => {
+    const f = parser.parse(xml);
     return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
-  });
-  const pick   = items[Math.floor(Math.random() * Math.min(items.length, 15))];
-  const art    = { title: pick.title, link: typeof pick.link === 'string' ? pick.link : pick.link?.['@_href'] };
+  }).filter(Boolean);
 
+  // Barajar con Durstenfeld
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+
+  /* ④ Función para verificar que el enlace responde (HEAD 2 s) */
+  const linkOk = async url => {
+    if (!url) return false;
+    try {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), 2000);
+      const r  = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+      clearTimeout(id);
+      return r.ok;
+    } catch { return false; }
+  };
+
+  /* ⑤ Encuentra el primer artículo con link válido */
+  let pick;
+  for (const it of items.slice(0, 40)) {            // máx 40 intentos
+    const link = typeof it.link === 'string' ? it.link
+               : it.link?.['@_href'] || it.link?.['@_url'];
+    if (await linkOk(link)) {
+      pick = { title: it.title, link };
+      break;
+    }
+  }
+  if (!pick) return 'Hoy no se encontraron enlaces válidos.';
+
+  /* ⑥ Prompt a GPT */
   const prompt = `
-🔍 Ensayo detectado: «${art.title}».
+🔍 Ensayo: «${pick.title}».
 1. Resume en 2-3 líneas su valor para un profesional ocupado.
-2. Relaciónalo con un interés extra-laboral (filosofía, ciencia o historia).
-3. Termina con una pregunta provocadora.
-4. Cierra con (leer).
+2. Relaciónalo con filosofía, ciencia o historia.
+3. Cierra con una pregunta provocadora.
+4. Termina con (leer).
   `;
-  const txt = await askGPT(prompt, 200, 0.75)
-                 .replace('(leer)', `(leer)(${art.link})`);
+  const txt = (await askGPT(prompt, 200, 0.75))
+                .replace('(leer)', `(leer)(${pick.link})`);
 
-  cache.set(k, txt, 86400);
+  cache.set(k, txt, 86_400);            // 24 h
   return txt;
 }
+
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   const [cl, rock, ag] = await Promise.all([weather(), bigRocks(), agenda()]);
@@ -466,18 +445,21 @@ async function briefFull() {
     weather(), agenda(), pendientes(), bigRocks(), intelGlobal(), horoscopo(), bonusTrack()
   ]);
 
-  /* — Análisis Estratégico del Día — */
   const promptCoach = `
-⚔️ Actúa como un estratega militar con disciplina de monje estoico.
-Responde en español con **exactamente tres viñetas**:
-1️⃣ Foco Principal  
-2️⃣ Riesgo a Mitigar  
-3️⃣ Acción Clave  
-Luego añade: «El éxito hoy se medirá por: ____».
+⚔️ Actúa como estratega militar y monje estoico.
+Tres viñetas:
+1️⃣ Foco Principal
+2️⃣ Riesgo a Mitigar
+3️⃣ Acción Clave
+Luego: “El éxito hoy se medirá por: …”
 
-Agenda:\n${ag.join('\n')||'—'}\n
-Pendientes:\n${pend.join('\n')||'—'}\n
-Big Rock:\n${rock.join('\n')||'—'}`;
+Agenda:
+${ag.join('\n')||'—'}
+Pendientes:
+${pend.join('\n')||'—'}
+Big Rock:
+${rock.join('\n')||'—'}
+  `;
   const analisis = await askGPT(promptCoach,250,0.65);
 
   return [
@@ -525,11 +507,3 @@ app.post(`/webhook/${TELEGRAM_SECRET}`, async (req,res)=>{
 app.get('/healthz',(_,res)=>res.send('ok'));
 
 app.listen(PORT,()=>console.log(`🚀 Joya Ultimate corriendo en ${PORT}`));
-
-/* ─── helper seguro (colócalo arriba, 1 sola vez) ───────────────── */
-const fetchSafe = (url, ms = 3000) =>
-  Promise.race([
-    fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }).then(r => r.text()),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
-  ]).catch(() => null); // nunca lanza, devuelve null si falla
-
