@@ -1,17 +1,17 @@
 /* ╔════════════════════════════════════════════════════════════════╗
  * ║      ASISTENTE JOYA ULTIMATE · v2025                           ║
  * ║    Telegram · Google Sheets · Calendar · OpenWeather · OpenAI   ║
- * ║    Node 18 (ESM) — preparado para Render PaaS                    ║
+ * ║    Node 18 (ESM) — preparado para Render PaaS                   ║
  * ╚════════════════════════════════════════════════════════════════╝ */
 
-import express       from 'express';
-import NodeCache     from 'node-cache';
-import { google }    from 'googleapis';
-import { DateTime }  from 'luxon';
+import express from 'express';
+import NodeCache from 'node-cache';
+import fetchPkg from 'node-fetch';
+import { google } from 'googleapis';
+import { DateTime } from 'luxon';
 import { XMLParser } from 'fast-xml-parser';
-import fetchPkg      from 'node-fetch';
 
-// ───── POLYFILL fetch (Node <18.20) ───────────────────────────────
+// ───── POLYFILL fetch (Node 18 < 18.20) ───────────────────────────
 if (typeof globalThis.fetch !== 'function') {
   globalThis.fetch   = fetchPkg;
   globalThis.Headers = fetchPkg.Headers;
@@ -19,14 +19,14 @@ if (typeof globalThis.fetch !== 'function') {
   globalThis.Response= fetchPkg.Response;
 }
 
-/* ─── ENV & CONSTANTES ──────────────────────────────────────────── */
+/* ─── ENV ───────────────────────────────────────────────────────── */
 const {
   PORT = 3000,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_SECRET,
   OPENWEATHER_API_KEY,
   OPENAI_API_KEY,
-  GEMINI_API_KEY,
+  NINJAS_KEY,
   CIUDAD_CLIMA = 'Santiago,cl',
   DASHBOARD_SPREADSHEET_ID,
   AGENDA_SHEET_ID,
@@ -36,144 +36,151 @@ const {
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_SECRET) {
-  throw new Error('❌ Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_SECRET');
+  throw new Error('❌ Debes definir TELEGRAM_BOT_TOKEN y TELEGRAM_SECRET en las env vars');
 }
 if (!DASHBOARD_SPREADSHEET_ID) {
   console.warn('⚠️ DASHBOARD_SPREADSHEET_ID no definido — funciones de Sheets fallarán');
 }
 
-/* ─── EXPRESS & CACHE ───────────────────────────────────────────── */
-const app   = express();
+/* ─── Express & caché ───────────────────────────────────────────── */
+const app = express();
 app.use(express.json({ limit: '1mb' }));
-const cache = new NodeCache({ stdTTL: 300 });           // 5 min
+const cache = new NodeCache({ stdTTL: 300 });
 const TELE_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-const banner   = (title, emoji) => `\n${emoji} *${title}*\n──────────────`;
+const banner   = (t, e) => `\n${e} *${t}*\n──────────────`;
 const escapeMd = s => (s||'').replace(/([\\_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
 
-/* ─── FETCH SEGURO ──────────────────────────────────────────────── */
+/* ─── fetchSafe ─────────────────────────────────────────────────── */
 const fetchSafe = (url, ms = 3000) =>
   Promise.race([
-    fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }}).then(r => r.text()),
+    fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }).then(r => r.text()),
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
   ]).catch(() => null);
 
-/* ─── GOOGLE AUTH SINGLETONS ───────────────────────────────────── */
+/* ─── Google Auth Singletons ────────────────────────────────────── */
 const singleton = fn => { let inst; return (...args) => inst ?? (inst = fn(...args)); };
 
 const googleClient = singleton(async scopes => {
-  const raw = GOOGLE_CREDENTIALS
-    || (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
+  const raw = GOOGLE_CREDENTIALS ||
+    (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
   if (!raw) throw new Error('❌ GOOGLE_CREDENTIALS(_B64) faltante');
   return new google.auth.GoogleAuth({ credentials: JSON.parse(raw), scopes }).getClient();
 });
 
-const sheetsClient   = singleton(async () =>
-  google.sheets({ version: 'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
+const sheetsClient = singleton(async () =>
+  google.sheets({ version:'v4', auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets']) })
 );
 const calendarClient = singleton(async () =>
   google.calendar({
-    version: 'v3',
+    version:'v3',
     auth: await googleClient(['https://www.googleapis.com/auth/calendar.readonly'])
   })
 );
 
-/* ─── TELEGRAM SENDER ───────────────────────────────────────────── */
-async function sendTelegram(chatId, text) {
-  if (!chatId || !text) return;
+/* ─── Telegram helper ───────────────────────────────────────────── */
+async function sendTelegram(chatId, txt) {
+  if (!chatId || !txt) return;
   const CHUNK = 4000;
-  for (let i = 0; i < text.length; i += CHUNK) {
-    const slice = text.slice(i, i + CHUNK);
+  for (let i = 0; i < txt.length; i += CHUNK) {
+    const part = txt.slice(i, i + CHUNK);
     await fetch(`${TELE_API}/sendMessage`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type':'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text: escapeMd(slice),
+        text: escapeMd(part),
         parse_mode: 'MarkdownV2'
       })
     }).catch(e => console.error('Telegram send error:', e.message));
   }
 }
 
-/* ─── OPENWEATHER ──────────────────────────────────────────────── */
+/* ─── OpenWeather ──────────────────────────────────────────────── */
 async function cityCoords(city) {
   const key = `coords_${city}`;
   if (cache.has(key)) return cache.get(key);
   if (!OPENWEATHER_API_KEY) return null;
   const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(city)}&limit=1&appid=${OPENWEATHER_API_KEY}`;
-  const [data] = await fetch(url).then(r=>r.json()).catch(()=>[]);
-  if (!data) return null;
-  const coords = { lat: data.lat, lon: data.lon };
+  const [d] = await fetch(url).then(r => r.json()).catch(() => []);
+  if (!d) return null;
+  const coords = { lat:d.lat, lon:d.lon };
   cache.set(key, coords, 86400);
   return coords;
 }
 
-async function weather() {
+async function getWeather() {
   const key = `weather_${CIUDAD_CLIMA}`;
   if (cache.has(key)) return cache.get(key);
   const coords = await cityCoords(CIUDAD_CLIMA);
   if (!coords) return 'Clima no disponible';
   const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${coords.lat}&lon=${coords.lon}&units=metric&lang=es&appid=${OPENWEATHER_API_KEY}`;
-  const data = await fetch(url).then(r=>r.json()).catch(()=>null);
-  if (!data?.list) return 'Clima no disponible';
+  const data = await fetch(url).then(r => r.json()).catch(() => null);
+  if (!data) return 'Clima no disponible';
   const today = DateTime.local().toISODate();
-  const list  = data.list.filter(i=>i.dt_txt.startsWith(today));
-  if (!list.length) return 'Pronóstico no disponible';
-  const min  = Math.round(Math.min(...list.map(i=>i.main.temp_min)));
-  const max  = Math.round(Math.max(...list.map(i=>i.main.temp_max)));
-  const desc = list[Math.floor(list.length/2)].weather[0].description;
-  const out  = `📉 Mín: ${min}°C · 📈 Máx: ${max}°C · ${desc[0].toUpperCase()}${desc.slice(1)}`;
+  const hits  = data.list.filter(i => i.dt_txt.startsWith(today));
+  if (!hits.length) return 'Pronóstico no disponible';
+  const min   = Math.round(Math.min(...hits.map(i=>i.main.temp_min)));
+  const max   = Math.round(Math.max(...hits.map(i=>i.main.temp_max)));
+  const desc  = hits[Math.floor(hits.length/2)].weather[0].description;
+  const out   = `📉 Mín: ${min}°C · 📈 Máx: ${max}°C · ${desc[0].toUpperCase()+desc.slice(1)}`;
   cache.set(key, out, 10800);
   return out;
 }
 
-/* ─── SHEETS UTILITIES ─────────────────────────────────────────── */
-const col = async (sheet, col='A') =>
-  (await sheetsClient()).spreadsheets.values.get({
+/* ─── Google Sheets Utils ─────────────────────────────────────── */
+async function col(sheetName, col='A') {
+  const gs = await sheetsClient();
+  const res = await gs.spreadsheets.values.get({
     spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-    range: `${sheet}!${col}:${col}`
-  }).then(r=>r.data.values?.flat()||[]);
+    range: `${sheetName}!${col}:${col}`
+  });
+  return res.data.values?.flat()||[];
+}
 
-const append = async (sheet, row) =>
-  (await sheetsClient()).spreadsheets.values.append({
+async function appendRow(sheetName, row) {
+  const gs = await sheetsClient();
+  await gs.spreadsheets.values.append({
     spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-    range: `${sheet}!A1`,
+    range: `${sheetName}!A1`,
     valueInputOption: 'USER_ENTERED',
     resource: { values: [row] }
   });
+}
 
-const getSheetId = singleton(async name => {
-  const meta = await (await sheetsClient()).spreadsheets.get({
+const getSheetId = singleton(async sheetName => {
+  const gs = await sheetsClient();
+  const meta = await gs.spreadsheets.get({
     spreadsheetId: DASHBOARD_SPREADSHEET_ID,
     fields: 'sheets.properties'
   });
-  const s = meta.data.sheets.find(s=>s.properties.title===name);
-  if (!s) throw new Error(`Sheet "${name}" no encontrado`);
-  return s.properties.sheetId;
+  const sh = meta.data.sheets.find(s=>s.properties.title===sheetName);
+  if (!sh) throw new Error(`Sheet "${sheetName}" no encontrado`);
+  return sh.properties.sheetId;
 });
 
-async function addUnique(sheet, text) {
-  const vals = await col(sheet);
-  if (vals.some(v=>v?.toLowerCase()===text.toLowerCase())) {
-    return `ℹ️ "${text}" ya existe en "${sheet}".`;
+async function addUnique(sheetName, text) {
+  const values = await col(sheetName);
+  if (values.some(v=>v?.toLowerCase()===text.toLowerCase())) {
+    return `ℹ️ "${text}" ya existe en "${sheetName}".`;
   }
-  await append(sheet, [text]);
-  return `✅ Agregado a "${sheet}": ${text}`;
+  await appendRow(sheetName, [text]);
+  return `✅ Agregado a "${sheetName}": ${text}`;
 }
 
-async function removeRow(sheet, text) {
+async function removeRow(sheetName, text) {
   try {
-    const vals = await col(sheet);
-    const idx  = vals.findIndex(v=>v?.toLowerCase()===text.toLowerCase());
-    if (idx<0) return `ℹ️ No se encontró "${text}" en "${sheet}".`;
-    await (await sheetsClient()).spreadsheets.batchUpdate({
+    const values = await col(sheetName);
+    const idx = values.findIndex(v=>v?.toLowerCase()===text.toLowerCase());
+    if (idx===-1) return `ℹ️ No se encontró "${text}" en "${sheetName}".`;
+    const gs = await sheetsClient();
+    await gs.spreadsheets.batchUpdate({
       spreadsheetId: DASHBOARD_SPREADSHEET_ID,
       requestBody: {
-        requests: [{
-          deleteDimension: {
-            range: {
-              sheetId: await getSheetId(sheet),
-              dimension: 'ROWS',
+        requests:[{
+          deleteDimension:{
+            range:{
+              sheetId: await getSheetId(sheetName),
+              dimension:'ROWS',
               startIndex: idx,
               endIndex: idx+1
             }
@@ -181,217 +188,260 @@ async function removeRow(sheet, text) {
         }]
       }
     });
-    return `🗑️ Eliminado de "${sheet}": ${text}`;
+    return `🗑️ Eliminado de "${sheetName}": ${text}`;
   } catch(e) {
     console.error('removeRow error:', e.message);
-    return `❌ Error al eliminar en "${sheet}".`;
+    return `❌ Error al eliminar en "${sheetName}".`;
   }
 }
 
-/* ─── AGENDA DE CALENDARIO ─────────────────────────────────────── */
-async function getCalendarAgenda() {
-  const key = 'agenda';
+/* ─── Big Rocks, Intereses, Pendientes, Agenda ─────────────────── */
+async function getBigRocks() {
+  const key='bigRocks';
   if (cache.has(key)) return cache.get(key);
-  const cal = await calendarClient();
-  const tz  = 'America/Santiago';
-  const now = DateTime.local().setZone(tz);
-  const end = now.endOf('day').toISO();
-  const start = now.startOf('day').toISO();
-  const list = await cal.calendarList.list().then(r=>r.data.items||[]);
-  const events = (await Promise.all(list.map(c=>
-    cal.events.list({ calendarId:c.id, timeMin:start, timeMax:end, singleEvents:true, orderBy:'startTime' })
-  ))).flatMap(r=>r.data.items||[])
-    .sort((a,b)=> new Date(a.start.dateTime||a.start.date)- new Date(b.start.dateTime||b.start.date))
-    .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
-    .map(e=>{
-      const h = e.start.dateTime
-        ? DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm')
-        : 'Todo el día';
-      return `• ${h} – ${e.summary||'(sin título)'}`;
-    });
-  cache.set(key, events, 300);
-  return events;
+  const list = (await col('BigRocks')).filter(Boolean).map(t=>'• '+t.trim());
+  cache.set(key, list, 120);
+  return list;
 }
 
-/* ─── SINCRONIZAR SHEET → CALENDARIO ───────────────────────────── */
-async function syncSheetToCalendar() {
-  const key = 'sync_agenda';
-  if (cache.has(key)) return;
-  if (!AGENDA_SHEET_ID) return;
-  try {
-    const sheets = await sheetsClient();
-    const cal    = await calendarClient();
-    const tab   = 'Hoja 1!A2:C';
-    const rows  = await sheets.spreadsheets.values.get({ spreadsheetId: AGENDA_SHEET_ID, range: tab })
-                        .then(r=>r.data.values||[]);
-    const tz    = 'America/Santiago';
-    const today = DateTime.local().setZone(tz);
-    let bufCal  = await cal.calendarList.list().then(r=>r.data.items.find(c=>c.summary==='Agenda oficina (importada)'));
-    if (!bufCal) {
-      const nc = await cal.calendars.insert({ resource:{ summary:'Agenda oficina (importada)' } });
-      bufCal = nc.data;
-    }
-    const existing = new Set(
-      (await cal.events.list({
-        calendarId:bufCal.id,
-        timeMin: today.startOf('day').toISO(),
-        timeMax: today.endOf('day').toISO(),
-        singleEvents:true
-      })).data.items.map(e=>`${e.summary}@${e.start.dateTime}`)
-    );
-    for (const [title, startRaw, endRaw] of rows) {
-      if (!title||!startRaw) continue;
-      const start = DateTime.fromISO(startRaw,{zone:tz});
-      const end   = endRaw
-        ? DateTime.fromISO(endRaw,{zone:tz})
-        : start.plus({minutes:30});
-      const keyEv = `${title}@${start.toISO()}`;
-      if (!existing.has(keyEv)) {
-        await cal.events.insert({
-          calendarId: bufCal.id,
-          resource: {
-            summary: title,
-            start: { dateTime: start.toISO(), timeZone: tz },
-            end:   { dateTime: end.toISO(),   timeZone: tz }
-          }
-        });
-      }
-    }
-    cache.set(key,true,3600);
-  } catch(e) {
-    console.error('syncSheetToCalendar:', e.message);
-  }
-}
-
-/* ─── GPT & GEMINI ─────────────────────────────────────────────── */
-async function askGPT(prompt, max_tokens=300, temperature=0.6) {
-  if (!OPENAI_API_KEY) return '[OPENAI_API_KEY faltante]';
-  const res = await fetch('https://api.openai.com/v1/chat/completions',{
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'Authorization':`Bearer ${OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      model:'gpt-4o-mini',
-      messages:[{role:'user',content:prompt}],
-      max_tokens,temperature
-    })
-  });
-  if (!res.ok) {
-    console.error('GPT error:', await res.text());
-    return `[GPT error: ${res.statusText}]`;
-  }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content.trim() || '[GPT vacío]';
-}
-
-async function getGemini(prompt, maxOutputTokens=150, temperature=0.5) {
-  if (!GEMINI_API_KEY) return '[GEMINI_API_KEY faltante]';
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
-    const payload = {
-      contents:[{parts:[{text:prompt}]}],
-      generationConfig:{maxOutputTokens,temperature}
-    };
-    const res = await fetch(url,{
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const j = await res.json();
-    return j.candidates?.[0]?.content?.parts?.[0]?.text.trim() || '[Gemini vacío]';
-  } catch(e) {
-    console.error('Gemini error:', e.message);
-    return '[Gemini error]';
-  }
-}
-
-async function hybridAI(prompt, max_tokens=300, temperature=0.7) {
-  const [g1, g2] = await Promise.all([
-    getGemini(prompt, max_tokens, temperature),
-    askGPT(prompt, max_tokens, temperature)
-  ]);
-  return `${g1}\n\n${g2}`;
-}
-
-/* ─── CONTENIDO DE IA ──────────────────────────────────────────── */
 async function getIntereses() {
-  const key = 'intereses';
+  const key='intereses';
   if (cache.has(key)) return cache.get(key);
   const list = (await col('Intereses')).slice(1).filter(Boolean).map(t=>t.trim());
   cache.set(key,list,600);
   return list;
 }
 
+async function getPendientes() {
+  const key='pendientes';
+  if (cache.has(key)) return cache.get(key);
+  const gs = await sheetsClient();
+  const res=await gs.spreadsheets.values.get({
+    spreadsheetId: DASHBOARD_SPREADSHEET_ID, range:'Pendientes!A2:G'
+  });
+  const rows = res.data.values||[];
+  const today = DateTime.local().startOf('day');
+  const out = rows.map(r=>({
+    tarea : r[1]||'(sin descripción)',
+    vence : r[2]?DateTime.fromJSDate(new Date(r[2])):null,
+    estado: (r[4]||'').toLowerCase(),
+    score : (Number(r[5])||2)*2 + (Number(r[6])||2)
+  }))
+  .filter(p=>!['done','discarded','waiting'].includes(p.estado))
+  .map(p=>({...p, atras: p.vence && p.vence<today}))
+  .sort((a,b)=> (b.atras-a.atras)||(b.score-a.score))
+  .slice(0,5)
+  .map(p=>`${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
+  cache.set(key,out,120);
+  return out;
+}
+
+async function getAgenda() {
+  const key='agenda';
+  if (cache.has(key)) return cache.get(key);
+  const cal = await calendarClient();
+  const tz  = 'America/Santiago';
+  const now = DateTime.local().setZone(tz);
+  const end = now.endOf('day');
+  const listCalendars = (await cal.calendarList.list()).data.items||[];
+  const allEvents = (await Promise.all(
+    listCalendars.map(c=>
+      cal.events.list({
+        calendarId:c.id,
+        timeMin: now.toISO(),
+        timeMax: end.toISO(),
+        singleEvents: true,
+        orderBy: 'startTime'
+      })
+    )
+  )).flatMap(r=>r.data.items||[])
+    .sort((a,b)=> new Date(a.start.dateTime||a.start.date) - new Date(b.start.dateTime||b.start.date))
+    .filter(e=>!(e.summary||'').toLowerCase().includes('office'))
+    .map(e=>{
+      const hora = e.start.dateTime
+        ? DateTime.fromISO(e.start.dateTime,{zone:tz}).toFormat('HH:mm')
+        : 'Todo el día';
+      return `• ${hora} – ${e.summary||'(sin título)'}`;
+    });
+  cache.set(key, allEvents, 300);
+  return allEvents;
+}
+
+/* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
+async function addWorkAgendaToPersonalCalendar() {
+  const key='syncAgenda';
+  if (cache.has(key)) return;
+  try {
+    if (!AGENDA_SHEET_ID) return;
+    const sheets = await sheetsClient();
+    const cal = await calendarClient();
+    const IMPORT_NAME = 'Agenda oficina (importada)';
+    const list = await cal.calendarList.list();
+    let buf = list.data.items.find(c=>c.summary===IMPORT_NAME);
+    if (!buf) {
+      const nc = await cal.calendars.insert({resource:{summary:IMPORT_NAME}});
+      buf = nc.data;
+    }
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: AGENDA_SHEET_ID, range:'Hoja 1!A2:C'
+    });
+    const rows = res.data.values||[];
+    const tz   = 'America/Santiago';
+    const day0 = DateTime.local().setZone(tz).startOf('day');
+    const day1 = DateTime.local().setZone(tz).endOf('day');
+    const exist = await cal.events.list({
+      calendarId: buf.id,
+      timeMin: day0.toISO(),
+      timeMax: day1.toISO(),
+      singleEvents: true
+    });
+    const seen = new Set((exist.data.items||[]).map(ev=>`${ev.summary}@${ev.start.dateTime}`));
+    for (const [title,startRaw,endRaw] of rows) {
+      if (!title||!startRaw) continue;
+      const start = DateTime.fromJSDate(new Date(startRaw),{zone:tz});
+      const end   = endRaw
+        ? DateTime.fromJSDate(new Date(endRaw),{zone:tz})
+        : start.plus({minutes:30});
+      const keyEv = `${title}@${start.toISO()}`;
+      if (!seen.has(keyEv) && !title.toLowerCase().includes('office')) {
+        await cal.events.insert({
+          calendarId: buf.id,
+          resource:{
+            summary: title,
+            start: {dateTime:start.toISO(), timeZone:tz},
+            end:   {dateTime:end.toISO(),   timeZone:tz}
+          }
+        });
+      }
+    }
+    cache.set(key,true,3600);
+  } catch(e) {
+    console.error('addWorkAgenda error:', e.message);
+  }
+}
+
+/* ─── OpenAI helper ────────────────────────────────────────────── */
+async function askGPT(prompt, max_tokens=300, temperature=0.6) {
+  if (!OPENAI_API_KEY) return '[OPENAI_API_KEY faltante]';
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},
+    body: JSON.stringify({
+      model:'gpt-4o-mini',
+      messages:[{role:'user',content:prompt}],
+      max_tokens, temperature
+    })
+  });
+  if (!res.ok) {
+    console.error('GPT error:', res.statusText);
+    return `[GPT error: ${res.statusText}]`;
+  }
+  const j = await res.json();
+  return j.choices?.[0]?.message?.content?.trim()||'[GPT vacío]';
+}
+
+/* ─── Radar Inteligencia Global ───────────────────────────────── */
 async function intelGlobal() {
-  const key='intel';
+  const key='intelGlobal';
   if (cache.has(key)) return cache.get(key);
   const FEEDS = [
     'https://warontherocks.com/feed/','https://www.foreignaffairs.com/rss.xml',
-    'https://www.theverge.com/rss/index.xml','https://restofworld.org/feed/latest/',
-    'https://feeds.bbci.co.uk/news/world/rss.xml','https://rss.nytimes.com/services/xml/rss/nyt/World.xml'
+    'https://www.cfr.org/rss.xml','https://carnegieendowment.org/rss/all-publications',
+    'https://www.csis.org/rss/analysis','https://www.rand.org/pubs.rss',
+    'https://globalvoices.org/feed/','https://thediplomat.com/feed/',
+    'https://www.foreignpolicy.com/feed','https://www.wired.com/feed/rss',
+    'https://feeds.arstechnica.com/arstechnica/index',
+    'https://www.theverge.com/rss/index.xml','http://feeds.feedburner.com/TechCrunch/',
+    'https://www.technologyreview.com/feed/','https://restofworld.org/feed/latest/',
+    'https://themarkup.org/feeds/rss.xml','https://www.schneier.com/feed/atom/',
+    'https://krebsonsecurity.com/feed/','https://thehackernews.com/feeds/posts/default',
+    'https://darknetdiaries.com/podcast.xml','https://stratechery.com/feed/',
+    'https://hbr.org/rss','https://www.ben-evans.com/rss',
+    'https://nautil.us/feed/','https://www.quantamagazine.org/feed/',
+    'https://singularityhub.com/feed/','https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
+    'https://feeds.bbci.co.uk/news/world/rss.xml','https://www.theguardian.com/world/rss',
+    'https://www.reuters.com/tools/rss','https://www.economist.com/rss',
+    'https://www.theatlantic.com/feed/all/','https://www.aljazeera.com/xml/rss/all.xml'
   ];
-  const parser = new XMLParser({ignoreAttributes:false,attributeNamePrefix:'@_'});
+  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
   const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
   const items = xmls.flatMap(x=>{
     const f = parser.parse(x);
-    return f.rss?f.rss.channel.item:f.feed?f.feed.entry:[];
-  }).slice(0,20);
+    return f.rss?f.rss.channel.item: f.feed?f.feed.entry: [];
+  }).slice(0,40);
   const heads = items.map((it,i)=>({
     id:i+1,
-    title:it.title,
-    link: typeof it.link==='string'?it.link:it.link?.['@_href']
+    title: it.title,
+    link:  typeof it.link==='string'?it.link:it.link?.['@_href']
   }));
   const intereses = (await getIntereses()).join(', ')||'geopolítica, tecnología';
   const prompt = `
 👁️ Analista senior. Intereses: ${intereses}
-Elige 4 titulares y para cada uno escribe 2-3 líneas de impacto con:
-• Oportunidad → …
-• Riesgo      → …
-• Implicancia para Chile → …
-Incluye [Link X] al final.
+FORMATO:
+◼️ *<Categoría>*
+» **Titular N°X** — 2-3 líneas
+   • Oportunidad → …
+   • Riesgo      → …
+   • Implicancia para Chile → …
+   • [Fuente X]
+
+Escoge 4 titulares.
 Titulares:
 ${heads.map(h=>`${h.id}: ${h.title}`).join('\n')}
 `;
-  let text = await hybridAI(prompt, 600, 0.7);
+  let out = await askGPT(prompt,700,0.7);
   heads.forEach(h=>{
-    text = text.replace(`[Link ${h.id}]`,`[Ver fuente](${h.link})`);
+    out = out.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
   });
-  cache.set(key,text,3600);
-  return text;
+  cache.set(key,out,3600);
+  return out;
 }
 
-async function horoscopo() {
-  const key='horo';
+/* ─── Horóscopo Supremo ─────────────────────────────────────────── */
+async function getHoroscopo() {
+  const key='horoscopo';
   if (cache.has(key)) return cache.get(key);
-  const drafts = await Promise.allSettled([
-    fetchSafe('https://aztro.sameerkumar.website/?sign=libra&day=today').then(t=>t&&JSON.parse(t).description),
+  const fuentes = [
+    fetchSafe('https://aztro.sameerkumar.website/?sign=libra&day=today')
+      .then(t=>t&&JSON.parse(t).description).catch(()=>null),
     NINJAS_KEY
       ? fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra',{headers:{'X-Api-Key':NINJAS_KEY}})
           .then(r=>r.json()).then(d=>d.horoscope).catch(()=>null)
       : null,
-    askGPT('Horóscopo Libra hoy (3-4 líneas, profesional).',150,0.7),
-    askGPT('Horóscopo Libra (carrera/finanzas).',150,0.7),
-    askGPT('Horóscopo Libra (bienestar emocional).',150,0.7)
-  ]);
-  const combined = drafts.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value).join('\n\n');
+    askGPT('Horóscopo Libra global (3 líneas, español).',120,0.7),
+    askGPT('Horóscopo Libra carrera/finanzas (3 líneas, español).',120,0.7),
+    askGPT('Horóscopo Libra bienestar personal (3 líneas, español).',120,0.8)
+  ];
+  const results = await Promise.allSettled(fuentes);
+  const drafts = results.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value).join('\n\n');
+  if (!drafts) return 'Horóscopo no disponible.';
   const prompt = `
-Eres astrólogo maestro. Sintetiza en un *Mega Horóscopo* (titular en negrita + 4-5 líneas) en español:
-${combined}
+Eres astrólogo maestro. Sintetiza estos borradores en UN solo horóscopo (titular en negrita + 4-5 líneas), español:
+
+${drafts}
 `;
-  const final = await hybridAI(prompt, 250, 0.6);
+  const final = await askGPT(prompt,250,0.6);
   cache.set(key,final,21600);
   return final;
 }
 
+/* ─── Bonus Track ───────────────────────────────────────────────── */
 async function bonusTrack() {
-  const key='bonus';
+  const key='bonusTrack';
   if (cache.has(key)) return cache.get(key);
   const FEEDS = [
-    'https://aeon.co/feed.rss','https://psyche.co/feed','https://longnow.org/ideas/feed/',
-    'https://nautil.us/feed/','https://www.quantamagazine.org/feed/','https://publicdomainreview.org/feed/',
-    'https://elpais.com/rss/cultura.xml','https://hipertextual.com/feed'
+    'https://aeon.co/feed.rss','https://psyche.co/feed','https://www.noemamag.com/feed/',
+    'https://longnow.org/ideas/feed/','https://www.the-tls.co.uk/feed/','https://laphamsquarterly.org/rss.xml',
+    'https://www.nybooks.com/feed/','https://thepointmag.com/feed/','https://thebaffler.com/feed',
+    'https://quillette.com/feed/','https://palladiummag.com/feed/','https://nautil.us/feed/',
+    'https://www.quantamagazine.org/feed/','https://www.technologyreview.com/feed/',
+    'https://arstechnica.com/science/feed/','https://www.wired.com/feed/category/science/latest/rss',
+    'https://stratechery.com/feed/','https://knowingneurons.com/feed/','https://longreads.com/feed/',
+    'https://getpocket.com/explore/rss','https://publicdomainreview.org/feed/',
+    'https://daily.jstor.org/feed/','https://bigthink.com/feed/',
+    'https://sidebar.io/feed.xml','https://elgatoylacaja.com/feed/','https://ethic.es/feed/',
+    'https://principia.io/feed/','https://ctxt.es/es/rss.xml','https://elpais.com/rss/cultura.xml',
+    'https://hipertextual.com/feed','https://www.bbvaopenmind.com/en/feed/'
   ];
   const parser = new XMLParser({ignoreAttributes:false,attributeNamePrefix:'@_'});
   const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
@@ -404,16 +454,23 @@ async function bonusTrack() {
     const j=Math.floor(Math.random()*(i+1));
     [items[i],items[j]]=[items[j],items[i]];
   }
-  // elegir primer link válido
-  let pick;
-  for(const it of items.slice(0,30)){
-    const link = typeof it.link==='string'?it.link:it.link?.['@_href'];
+  // buscar link válido
+  const linkOk = async url=>{
+    if(!url) return false;
     try {
-      const r = await fetch(link,{method:'HEAD',signal:AbortSignal.timeout(2000)});
-      if(r.ok){ pick={title:it.title,link}; break; }
-    } catch{}
+      const ctrl = new AbortController();
+      const id = setTimeout(()=>ctrl.abort(),2000);
+      const r = await fetch(url,{method:'HEAD',signal:ctrl.signal});
+      clearTimeout(id);
+      return r.ok;
+    } catch { return false; }
+  };
+  let pick=null;
+  for(const it of items.slice(0,40)){
+    const link=typeof it.link==='string'?it.link:it.link?.['@_href']||it.link?.['@_url'];
+    if(await linkOk(link)){ pick={title:it.title,link}; break; }
   }
-  if(!pick) return 'No se encontraron artículos válidos hoy.';
+  if(!pick) return 'No se encontró artículo válido.';
   const prompt = `
 🔍 Ensayo: «${pick.title}».
 1. Resume en 2-3 líneas su valor para un profesional ocupado.
@@ -421,108 +478,119 @@ async function bonusTrack() {
 3. Cierra con una pregunta provocadora.
 4. Termina con (leer).
 `;
-  const txt = (await hybridAI(prompt,200,0.75))
-                .replace('(leer)',`(leer)(${pick.link})`);
+  let txt = await askGPT(prompt,200,0.75);
+  txt = txt.replace('(leer)',`(leer)(${pick.link})`);
   cache.set(key,txt,86400);
   return txt;
 }
 
-/* ─── BRIEFS ───────────────────────────────────────────────────── */
+/* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
-  const [cl, rock, ag, pend] = await Promise.all([
-    weather(), bigRocks(), getCalendarAgenda(), pendientes()
+  const [clima, bigRocks, agendaList, pendientesList] = await Promise.all([
+    getWeather(), getBigRocks(), getAgenda(), getPendientes()
   ]);
   return [
     '⚡️ *Resumen Rápido*',
-    banner('Clima','🌦️'), cl,
-    banner('Big Rock','🚀'), rock.join('\n')||'_(No definido)_',
-    banner('Pendientes','🔥'), pend.join('\n')||'_(Sin pendientes)_',
-    banner('Agenda','📅'), ag.join('\n')||'_(Sin eventos)_'
+    banner('Clima','🌦️'), clima,
+    banner('Misión Principal (Big Rock)','🚀'), bigRocks.join('\n')||'_(No definido)_',
+    banner('Focos Críticos (Pendientes)','🔥'), pendientesList.join('\n')||'_(Sin pendientes)_',
+    banner('Agenda del Día','📅'), agendaList.join('\n')||'_(Sin eventos)_'
   ].join('\n\n');
 }
 
 async function briefFull() {
-  await syncSheetToCalendar();
-  const [cl, ag, pend, rock, intel, horo, bonus] = await Promise.all([
-    weather(), getCalendarAgenda(), pendientes(), bigRocks(),
-    intelGlobal(), horoscopo(), bonusTrack()
+  await addWorkAgendaToPersonalCalendar();
+  const [clima, agendaList, pendientesList, bigRocks, intel, horo, bonus] = await Promise.all([
+    getWeather(), getAgenda(), getPendientes(), getBigRocks(), intelGlobal(), getHoroscopo(), bonusTrack()
   ]);
   const promptCoach = `
-⚔️ Jefe de Gabinete y coach estratégico: formatea en 4 viñetas:
-1️⃣ Foco Principal
-2️⃣ Riesgo a Mitigar
-3️⃣ Acción Clave
-4️⃣ Métrica de Éxito
-Datos:
+⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal.
+Tu respuesta en 4 puntos:
+1. **Foco Principal:** ...
+2. **Riesgo a Mitigar:** ...
+3. **Acción Clave:** ...
+4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
+---
 Agenda:
-${ag.join('\n')||'—'}
+${agendaList.join('\n')||'—'}
 Pendientes:
-${pend.join('\n')||'—'}
+${pendientesList.join('\n')||'—'}
 Big Rock:
-${rock.join('\n')||'—'}
+${bigRocks.join('\n')||'—'}
 `;
-  const analysis = await hybridAI(promptCoach,350,0.7);
+  const analisis = await askGPT(promptCoach,350,0.7);
   return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
-    banner('Análisis Estratégico','🧠'), analysis,
-    banner('Clima','🌦️'), cl,
-    banner('Agenda','📅'), ag.join('\n')||'_(Sin eventos)_',
-    banner('Pendientes','🔥'), pend.join('\n')||'_(Sin pendientes)_',
-    banner('Big Rock','🚀'), rock.join('\n')||'_(No definido)_',
-    banner('Radar Inteligencia','🌍'), intel,
+    banner('Análisis Estratégico','🧠'), analisis,
+    banner('Clima','🌦️'), clima,
+    banner('Agenda','📅'), agendaList.join('\n')||'_(Sin eventos)_',
+    banner('Pendientes Críticos','🔥'), pendientesList.join('\n')||'_(Sin pendientes)_',
+    banner('Tu Misión Principal (Big Rock)','🚀'), bigRocks.join('\n')||'_(No definido)_',
+    banner('Radar Inteligencia Global','🌍'), intel,
     banner('Horóscopo (Libra)','🔮'), horo,
     banner('Bonus Track','🎁'), bonus
   ].join('\n\n');
 }
 
-/* ─── DIAGNÓSTICO ──────────────────────────────────────────────── */
+/* ─── Estado del Sistema ───────────────────────────────────────── */
 async function getSystemStatus() {
   const checks = await Promise.allSettled([
-    sheetsClient().then(()=> '✅ Google Sheets'),
-    calendarClient().then(()=> '✅ Google Calendar'),
-    askGPT('test',1).then(r=>r.includes('[')?`❌ OpenAI (${r})`:'✅ OpenAI'),
-    weather().then(r=>r.includes('disponible')?`❌ OpenWeather`:'✅ OpenWeather')
+    sheetsClient().then(()=>`✅ Google Sheets`),
+    calendarClient().then(()=>`✅ Google Calendar`),
+    askGPT('test',1).then(r=>r.includes('[')?`❌ OpenAI (${r})`:`✅ OpenAI`),
+    getWeather().then(r=>r.includes('disponible')?`❌ OpenWeather`:`✅ OpenWeather`)
   ]);
-  return '*Estado del Sistema JOYA*\n──────────────\n'+
-    checks.map(res=> res.status==='fulfilled'?res.value:`❌ ${res.reason.message}`).join('\n');
+  return `*Estado del Sistema Asistente JOYA*\n──────────────\n` +
+    checks.map(r=> r.status==='fulfilled'? r.value : `❌ ${r.reason.message}`).join('\n');
 }
 
-/* ─── ROUTER & WEBHOOK ─────────────────────────────────────────── */
-async function router(msg){
-  const [cmd,...args] = (msg.text||'').trim().split(' ');
-  const arg = args.join(' ').trim();
-  switch(cmd){
-    case '/start': case '/help':
-      return '*JOYA* comandos:\n/brief\n/briefcompleto\n/addrock <t>\n/removerock <t>\n/addinteres <i>\n/removeinteres <i>\n/status';
-    case '/brief':         return await briefShort();
-    case '/briefcompleto': return await briefFull();
-    case '/status':        return await getSystemStatus();
-    case '/addrock':       return arg? await addUnique('BigRocks',arg): '✏️ Falta tarea';
-    case '/removerock':    return arg? await removeRow('BigRocks',arg): '✏️ Falta tarea';
-    case '/addinteres':    return arg? await addUnique('Intereses',arg): '✏️ Falta interés';
-    case '/removeinteres': return arg? await removeRow('Intereses',arg): '✏️ Falta interés';
-    default: return '🤖 Comando no reconocido. Usa /help';
+/* ─── Command Router ───────────────────────────────────────────── */
+async function router(msg) {
+  const [cmd,...rest] = (msg.text||'').trim().split(' ');
+  const arg = rest.join(' ').trim();
+  switch(cmd) {
+    case '/start':
+    case '/help':
+      return '*JOYA* comandos:\n/brief\n/briefcompleto\n/addrock <t>\n/removerock <t>\n/addinteres <t>\n/removeinteres <t>\n/status';
+    case '/brief':
+      return await briefShort();
+    case '/briefcompleto':
+      return await briefFull();
+    case '/status':
+      return await getSystemStatus();
+    case '/addrock':
+      return arg ? await addUnique('BigRocks', arg) : '✏️ Falta la tarea.';
+    case '/removerock':
+      return arg ? await removeRow('BigRocks', arg) : '✏️ Falta la tarea a eliminar.';
+    case '/addinteres':
+      return arg ? await addUnique('Intereses', arg) : '✏️ Falta el interés.';
+    case '/removeinteres':
+      return arg ? await removeRow('Intereses', arg) : '✏️ Falta el interés a eliminar.';
+    default:
+      return '🤖 Comando no reconocido. Usa /help';
   }
 }
 
+/* ─── Webhook & Server ─────────────────────────────────────────── */
 app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
   res.sendStatus(200);
-  (async()=>{
+  (async()=> {
     const msg = req.body.message;
-    if (!msg?.text) return;
     try {
-      const reply = await router(msg);
-      await sendTelegram(msg.chat.id, reply);
+      if (msg?.text) {
+        const reply = await router(msg);
+        await sendTelegram(msg.chat.id, reply);
+      }
     } catch(err) {
-      console.error('Webhook error:', err);
+      console.error('Webhook async error:', err);
       if (ADMIN_CHAT_ID) {
         await sendTelegram(ADMIN_CHAT_ID,
-          `🔴 *Error Crítico*\nComando: \`${msg.text}\`\nError: \`${err.message}\``);
+          `🔴 *Error crítico*\nComando: \`${msg.text}\`\nError: \`${err.message}\``);
       }
     }
   })();
 });
 
-app.get('/healthz', (_,res)=> res.send('ok'));
-app.listen(PORT, ()=> console.log(`🚀 Joya Ultimate escuchando en ${PORT}`));
+app.get('/healthz', (_,res) => res.send('ok'));
+app.listen(PORT, ()=> console.log(`🚀 Joya Ultimate escuchando en puerto ${PORT}`));
