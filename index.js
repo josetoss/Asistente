@@ -450,9 +450,7 @@ async function bonusTrack() {
 }
 
 /* ─── Briefs ────────────────────────────────────────────────────── */
-/* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
-  // CORRECCIÓN: Usamos nombres de variables descriptivos y consistentes.
   const [clima, bigRock, agenda, pendientes] = await Promise.all([
     weather(), 
     bigRocks(), 
@@ -461,7 +459,7 @@ async function briefShort() {
   ]);
 
   return [
-    '⚡️ *Resumen Rápido*',
+    ⚡️ *Resumen Rápido*',
     banner('Clima', '🌦️'), 
     clima,
     banner('Misión Principal', '🚀'), 
@@ -481,23 +479,30 @@ async function briefFull() {
         weather(), agenda(), pendientes(), bigRocks(), intelGlobal(), horoscopo(), bonusTrack()
     ]);
 
-    const promptCoach = `
-    ⚔️ Actúa como estratega militar y monje estoico. Analiza los siguientes datos del día.
-    Responde con tres viñetas concisas y potentes:
-    1️⃣ Foco Principal: ¿Cuál es la única cosa que debe lograrse hoy?
-    2️⃣ Riesgo a Mitigar: ¿Cuál es la mayor distracción o peligro para el foco?
-    3️⃣ Acción Clave: ¿Cuál es la primera acción tangible a ejecutar?
-    Finalmente, añade una línea: "El éxito hoy se medirá por: <define una métrica clara>".
-    Responde en español.
+   // Dentro de la función briefFull()
 
-    Agenda:
-    ${agenda.join('\n') || '—'}
-    Pendientes:
-    ${pendientes.join('\n') || '—'}
-    Big Rock:
-    ${bigRock.join('\n') || '—'}
-    `;
-    const analisis = await askGPT(promptCoach, 300, 0.65);
+const promptCoach = `⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal. Soy un profesional con una agenda exigente. Analiza mis datos del día de forma cruda, directa y sin rodeos.
+
+Tu respuesta debe tener el siguiente formato:
+1.  **Foco Principal:** <Describe en una frase la única misión crítica del día.>
+2.  **Riesgo a Mitigar:** <Identifica la mayor distracción, el mayor riesgo para el foco, o una reunión que podría descarrilar el día.>
+3.  **Acción Clave:** <Define la primera acción, la más pequeña y tangible, que debo ejecutar para empezar a ganar el día.>
+4.  **Métrica de Éxito:** <Termina con la frase "El éxito hoy se medirá por:" y define una métrica clara y concreta.>
+
+Responde exclusivamente en español.
+
+---
+DATOS DEL DÍA:
+Agenda:
+${agenda.join('\n') || '—'}
+
+Pendientes Críticos:
+${pendientes.join('\n') || '—'}
+
+Misión Principal (Big Rock):
+${bigRock.join('\n') || '—'}
+`;
+const analisis = await askGPT(promptCoach, 350, 0.7);
 
     return [
         '🗞️ *MORNING BRIEF ULTIMATE*',
@@ -562,4 +567,56 @@ async function getSystemStatus() {
     });
     
     return `*Estado del Sistema Asistente JOYA*\n──────────────\n${statusLines.join('\n')}`;
+}
+/* ─── Sheets utils (Big Rocks & Intereses) ─────────────────────── */
+
+const bigRocks = async () => {
+  const k = 'bigR';
+  if (cache.has(k)) return cache.get(k);
+  const list = (await col('BigRocks')).filter(Boolean).map(t => '• ' + t.trim());
+  cache.set(k, list, 120); // Cache por 2 minutos
+  return list;
+};
+
+const getIntereses = async () => {
+  const k = 'inter';
+  if (cache.has(k)) return cache.get(k);
+  const list = (await col('Intereses')).slice(1).filter(Boolean).map(t => t.trim());
+  cache.set(k, list, 600); // Cache por 10 minutos
+  return list;
+};
+/* ─── Command Router ───────────────────────────────────────────── */
+async function router(msg) {
+  const [cmd, ...rest] = (msg.text || '').trim().split(' ');
+  const arg = rest.join(' ').trim();
+  
+  switch (cmd) {
+    case '/start':
+    case '/help':
+      return '*JOYA* comandos:\n/brief\n/briefcompleto\n/addrock <t>\n/removerock <t>\n/addinteres <t>\n/removeinteres <t>\n/status';
+    
+    case '/brief':
+      return await briefShort();
+      
+    case '/briefcompleto':
+      return await briefFull();
+      
+    case '/status':
+      return await getSystemStatus();
+      
+    case '/addrock':
+      return arg ? await addUnique('BigRocks', arg) : ✏️ Falta la tarea.';
+      
+    case '/removerock':
+      return arg ? await removeRow('BigRocks', arg) : '✏️ Falta la tarea a eliminar.';
+      
+    case '/addinteres':
+      return arg ? await addUnique('Intereses', arg) : '✏️ Falta el interés.';
+      
+    case '/removeinteres':
+      return arg ? await removeRow('Intereses', arg) : '✏️ Falta el interés a eliminar.';
+      
+    default:
+      return '🤖 Comando desconocido. Usa /help';
+  }
 }
