@@ -653,7 +653,8 @@ async function intelGlobal() {
   ];
 
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+  // CAMBIO AQUÍ: Añadimos 5000ms de timeout
+  const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 5000)))).filter(Boolean);
   const items = xmls.flatMap(x => {
     const f = parser.parse(x);
     return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
@@ -729,9 +730,10 @@ async function bonusTrack() {
     'https://elgatoylacaja.com/feed/', 'https://hipertextual.com/feed'
   ];
 
-  try {
+   try {
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-    const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+    // CAMBIO AQUÍ: Añadimos 7000ms de timeout
+    const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 7000)))).filter(Boolean);
     const items = xmls.flatMap(x => {
       const f = parser.parse(x);
       return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
