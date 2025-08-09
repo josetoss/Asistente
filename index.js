@@ -18,17 +18,25 @@ const singleton = fn => {
 const sheetsClient = singleton(async () => {
   return google.sheets({
     version: 'v4',
+    // Scope para leer y escribir en Google Sheets
     auth: await googleClient(['https://www.googleapis.com/auth/spreadsheets'])
   });
 });
-
 // ─── Google Calendar client ─────────────────────────────────────────
 const calendarClient = singleton(async () => {
   return google.calendar({
     version: 'v3',
+    // Scope para leer y escribir en Google Calendar
     auth: await googleClient(['https://www.googleapis.com/auth/calendar'])
   });
 });
+
+const SHEET_RANGES = {
+  BIG_ROCKS: 'BigRocks!A2:A',
+  INTERESES: 'Intereses!A2:A',
+  INTERESES_BONUS: 'InteresesBonus!A:A',
+  PENDIENTES: 'Pendientes!A2:G'
+};
 
 // ───── POLYFILL fetch (Node 18 < 18.20) ───────────────────────────
 if (typeof globalThis.fetch !== 'function') {
@@ -79,38 +87,42 @@ const fetchSafe = (url, ms = 3000) =>
 
 // ─── Google Auth Singleton con validación de JSON ────────────
 const googleClient = singleton(async (scopes) => {
-  const raw = GOOGLE_CREDENTIALS ||
-    (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
-  if (!raw) {
-    throw new Error('❌ Debes definir GOOGLE_CREDENTIALS o GOOGLE_CREDENTIALS_B64 en las vars de entorno');
-  }
-  let creds;
-  try {
-    creds = JSON.parse(raw);
-  } catch (err) {
-    console.error('❌ Falló JSON.parse de GOOGLE_CREDENTIALS:', raw);
-    throw new Error('Credenciales de Google inválidas: JSON mal formado');
-  }
-  const auth = new google.auth.GoogleAuth({
-    credentials: creds,
-    scopes: scopes
-  });
-  return auth.getClient();
+  const raw = GOOGLE_CREDENTIALS ||
+    (GOOGLE_CREDENTIALS_B64 && Buffer.from(GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8'));
+  if (!raw) {
+    throw new Error('❌ Debes definir GOOGLE_CREDENTIALS o GOOGLE_CREDENTIALS_B64 en las vars de entorno');
+  }
+  let creds;
+  try {
+    creds = JSON.parse(raw);
+  } catch (err) {
+    console.error('❌ Falló JSON.parse de GOOGLE_CREDENTIALS:', raw);
+    throw new Error('Credenciales de Google inválidas: JSON mal formado');
+  }
+  const auth = new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: scopes
+  });
+  return auth.getClient();
 });
 
 /* ─── Telegram helper ───────────────────────────────────────────── */
 async function sendTelegram(chatId, txt) {
+  // Si no hay destinatario o texto, no hacemos nada.
   if (!chatId || !txt) return;
-  const CHUNK = 4000;
+
+  const CHUNK = 4090; // Límite oficial 4096, dejamos un pequeño margen de seguridad.
+
   for (let i = 0; i < txt.length; i += CHUNK) {
     const part = txt.slice(i, i + CHUNK);
+    
     await fetch(`${TELE_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text: escapeMd(part),
-        parse_mode: 'MarkdownV2'
+        text: part,             // 1. Se envía el texto directamente, sin escaparlo.
+        parse_mode: 'Markdown'  // 2. Usamos 'Markdown' estándar, es más flexible para la IA.
       })
     }).catch(e => console.error('Telegram send error:', e.message));
   }
@@ -216,13 +228,53 @@ async function removeRow(sheetName, text) {
   }
 }
 
+async function findAndRemoveWithAI(sheetName, userQuery) {
+  try {
+    // Paso 1: Obtener la lista completa de items desde la hoja.
+    // Asumimos que la primera columna (A) contiene el texto a buscar.
+    const items = await col(sheetName, 'A');
+    if (!items.length) {
+      return `ℹ️ La lista "${sheetName}" está vacía.`;
+    }
+
+    // Paso 2: Crear el prompt para la IA.
+    const prompt = `
+      Eres un asistente de normalización de datos. Tu tarea es encontrar una coincidencia exacta en una lista.
+      Basado en la petición del usuario de eliminar "${userQuery}", ¿cuál de los siguientes items de la lista es el que quiere eliminar?
+
+      Lista de Items:
+      - ${items.join('\n- ')}
+
+      Responde SOLAMENTE con el texto exacto del item de la lista que coincida.
+      Si no hay una coincidencia clara o es ambiguo, responde EXACTAMENTE con la palabra "NULL".
+    `;
+
+    // Paso 3: Consultar a la IA.
+    const itemToDelete = await askAI(prompt, 100, 0.4); // Usamos baja temperatura para respuestas precisas.
+
+    // Paso 4: Procesar la respuesta de la IA.
+    if (itemToDelete === 'NULL' || itemToDelete.startsWith('[')) {
+      return `🤔 No pude determinar con seguridad qué item eliminar con "${userQuery}". Intenta ser un poco más específico.`;
+    }
+
+    // Paso 5: Usar la función de eliminación original con el texto exacto.
+    return await removeRow(sheetName, itemToDelete);
+
+  } catch (e) {
+    console.error(`Error en findAndRemoveWithAI para "${sheetName}":`, e.message);
+    return `❌ Ocurrió un error al intentar la eliminación inteligente.`;
+  }
+}
+
+
+
 /* ─── Big Rocks, Intereses, Pendientes, Agenda ─────────────────── */
 
 async function getBigRocks() {
   const key = 'bigRocks';
   if (cache.has(key)) return cache.get(key);
   try {
-    const list = (await col('BigRocks')).filter(Boolean).map(t => '• ' + t.trim());
+    const list = (await col(SHEET_RANGES.BIG_ROCKS.split('!')[0])).filter(Boolean).map(t => '• ' + t.trim());
     cache.set(key, list, 120);
     return list;
   } catch (e) {
@@ -235,7 +287,7 @@ async function getIntereses() {
   const key = 'intereses';
   if (cache.has(key)) return cache.get(key);
   try {
-    const list = (await col('Intereses')).slice(1).filter(Boolean).map(t => t.trim());
+    const list = (await col(SHEET_RANGES.INTERESES.split('!')[0])).slice(1).filter(Boolean).map(t => t.trim());
     cache.set(key, list, 600);
     return list;
   } catch (e) {
@@ -245,38 +297,97 @@ async function getIntereses() {
 }
 
 async function getPendientes() {
-  const key = 'pendientes';
-  if (cache.has(key)) return cache.get(key);
-  try {
-    const gs = await sheetsClient();
-    const res = await gs.spreadsheets.values.get({
-      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-      range: 'Pendientes!A2:G'
-    });
-    const rows = res.data.values || [];
-    const today = DateTime.local().startOf('day');
-    const out = rows.map(r => ({
-        tarea: r[1] || '(sin descripción)',
-        vence: r[2] ? DateTime.fromJSDate(new Date(r[2])) : null,
-        estado: (r[4] || '').toLowerCase(),
-        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
-      }))
-      .filter(p => !['done', 'discarded', 'waiting'].includes(p.estado))
-      .map(p => ({
-        ...p,
-        atras: p.vence && p.vence < today
-      }))
-      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
-      .slice(0, 5)
-      .map(p => `${p.atras?'🔴':'•'} ${p.tarea}${p.vence?` (${p.vence.toFormat('dd-MMM')})`:''}`);
-    cache.set(key, out, 120);
-    return out;
-  } catch (e) {
-    console.error('getPendientes error:', e.message);
-    // La línea de abajo te permitirá ver un mensaje de error detallado en el brief
-    return [`❌ Error al obtener pendientes: ${e.message}`];
-  }
+  const key = 'pendientes';
+  // 1. La caché ahora funciona correctamente: primero busca el dato guardado.
+  if (cache.has(key)) {
+    console.log('Usando pendientes desde la caché.');
+    return cache.get(key);
+  }
+
+  console.log('Iniciando getPendientes (leyendo desde Google Sheets)...');
+
+  try {
+    const gs = await sheetsClient();
+    const res = await gs.spreadsheets.values.get({
+      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
+      // 2. Usamos la constante para mayor seguridad y fácil mantenimiento.
+      range: SHEET_RANGES.PENDIENTES 
+    });
+
+    const rows = res.data.values || [];
+    console.log(`- Filas obtenidas de Google Sheets: ${rows.length}`);
+    if (rows.length === 0) return [];
+
+    const today = DateTime.local().startOf('day');
+
+    const pendientesProcesados = rows.map((r, index) => {
+      const estado = (r[4] || '').toLowerCase().trim();
+      return {
+        tarea: r[1] || `(Tarea sin descripción en fila ${index + 2})`,
+        vence: r[2] ? DateTime.fromISO(new Date(r[2]).toISOString()) : null,
+        estado: estado,
+        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
+      };
+    });
+
+    const pendientesFiltrados = pendientesProcesados.filter(p => 
+      !['done', 'discarded', 'waiting'].includes(p.estado)
+    );
+    console.log(`- Filas después de filtrar por estado: ${pendientesFiltrados.length}`);
+
+    if (pendientesFiltrados.length === 0) {
+      return []; // No hay pendientes activos, devolvemos una lista vacía.
+    }
+
+    const listaFinal = pendientesFiltrados
+      .map(p => ({
+        ...p,
+        atras: p.vence && p.vence.isValid && p.vence < today
+      }))
+      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
+      .slice(0, 5)
+      .map(p => {
+        const fecha = p.vence && p.vence.isValid ? ` (${p.vence.toFormat('dd-MMM')})` : '';
+        return `${p.atras ? '🔴' : '•'} ${p.tarea}${fecha}`;
+      });
+
+    console.log(`- Lista final de pendientes para mostrar: ${listaFinal.length}`);
+    
+    // 3. Guardamos en caché solo si el resultado es bueno.
+    if (listaFinal.length > 0) {
+      cache.set(key, listaFinal, 120); // Cache por 2 minutos
+    }
+
+     return listaFinal;
+
+  } catch (e) {
+    console.error('Error CRÍTICO en getPendientes:', e.message);
+    return [`❌ Error en Pendientes: ${e.message}`];
+  }
 }
+
+//======================================================================
+// FUNCIÓN PARA LEER LOS NUEVOS INTERESES DEL BONUS TRACK
+//======================================================================
+async function getInteresesBonus() {
+  const key = 'interesesBonus';
+  if (cache.has(key)) return cache.get(key);
+  try {
+    const gs = await sheetsClient();
+    const res = await gs.spreadsheets.values.get({
+      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
+      range: SHEET_RANGES.INTERESES_BONUS
+    });
+    const list = (res.data.values?.flat() || []).filter(Boolean).map(t => t.trim());
+    console.log(`Intereses "Bonus" cargados: ${list.join(', ')}`);
+    cache.set(key, list, 600); // Cache por 10 minutos
+    return list;
+  } catch (e) {
+    console.error('getInteresesBonus error:', e.message);
+    return []; // Devuelve un array vacío si falla
+  }
+}
+
 
 async function getAgenda() {
   const cacheKey = 'agenda';
@@ -521,55 +632,57 @@ ${responseGPT}
   return reconciled;
 }
 
-/* ─── Radar Inteligencia Global ───────────────────────────────── */
+/* ─── Radar Inteligencia Global (Usa Intereses Profesionales) ── */
 async function intelGlobal() {
-  const key='intelGlobal';
+  const key = 'intelGlobal';
   if (cache.has(key)) return cache.get(key);
+  
   const FEEDS = [
-    'https://warontherocks.com/feed/','https://www.foreignaffairs.com/rss.xml',
-    'https://www.cfr.org/rss.xml','https://carnegieendowment.org/rss/all-publications',
-    'https://www.csis.org/rss/analysis','https://www.rand.org/pubs.rss',
-    'https://globalvoices.org/feed/','https://thediplomat.com/feed/',
-    'https://www.foreignpolicy.com/feed','https://www.wired.com/feed/rss',
-    'https://feeds.arstechnica.com/arstechnica/index',
-    'https://www.theverge.com/rss/index.xml','http://feeds.feedburner.com/TechCrunch/',
-    'https://www.technologyreview.com/feed/','https://restofworld.org/feed/latest/',
-    'https://themarkup.org/feeds/rss.xml','https://www.schneier.com/feed/atom/',
-    'https://krebsonsecurity.com/feed/','https://thehackernews.com/feeds/posts/default',
-    'https://darknetdiaries.com/podcast.xml','https://stratechery.com/feed/',
-    'https://hbr.org/rss','https://www.ben-evans.com/rss',
-    'https://nautil.us/feed/','https://www.quantamagazine.org/feed/',
-    'https://singularityhub.com/feed/','https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
-    'https://feeds.bbci.co.uk/news/world/rss.xml','https://www.theguardian.com/world/rss',
-    'https://www.reuters.com/tools/rss','https://www.economist.com/rss',
-    'https://www.theatlantic.com/feed/all/','https://www.aljazeera.com/xml/rss/all.xml'
+    'https://warontherocks.com/feed/', 'https://www.foreignaffairs.com/rss.xml',
+    'https://www.cfr.org/rss.xml', 'https://carnegieendowment.org/rss/all-publications',
+    'https://www.csis.org/rss/analysis', 'https://www.rand.org/pubs.rss',
+    'https://globalvoices.org/feed/', 'https://thediplomat.com/feed/',
+    'https://www.foreignpolicy.com/feed', 'https://www.wired.com/feed/rss',
+    'https://feeds.arstechnica.com/arstechnica/index', 'https://www.theverge.com/rss/index.xml',
+    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
+    'https://restofworld.org/feed/latest/', 'https://themarkup.org/feeds/rss.xml',
+    'https://www.schneier.com/feed/atom/', 'https://krebsonsecurity.com/feed/',
+    'https://thehackernews.com/feeds/posts/default', 'https://darknetdiaries.com/podcast.xml',
+    'https://stratechery.com/feed/', 'https://hbr.org/rss',
+    'https://www.ben-evans.com/rss', 'https://www.economist.com/rss'
   ];
-  const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:'@_' });
-  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
-  const items = xmls.flatMap(x=>{
-    const f = parser.parse(x);
-    return f.rss?f.rss.channel.item: f.feed?f.feed.entry: [];
-  }).slice(0,40);
-  const heads = items.map((it,i)=>({
-    id:i+1,
-    title: it.title,
-    link:  typeof it.link==='string'?it.link:it.link?.['@_href']
-  }));
-  const intereses = (await getIntereses()).join(', ')||'geopolítica, tecnología';
-  const prompt = `
-👁️ Analista senior. Intereses: ${intereses}
-Escoge 4 titulares. Para cada uno, escribe solo el titular y un resumen de 120-140 caracteres.
-Titulares:
-${heads.map(h=>`${h.id}: ${h.title}`).join('\n')}
-`;
-let out = await askAI(prompt,700,0.7);
-heads.forEach(h=>{
-  out = out.replace(`[Fuente ${h.id}]`,`[Ver fuente](${h.link})`);
-});
-cache.set(key,out,3600);
-return out;
-}
 
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+  const items = xmls.flatMap(x => {
+    const f = parser.parse(x);
+    return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
+  }).slice(0, 40);
+
+  const heads = items.map((it, i) => ({
+    id: i + 1,
+    title: it.title,
+    link: typeof it.link === 'string' ? it.link : it.link?.['@_href']
+  }));
+
+  // Usa la función getIntereses() que lee la hoja de temas profesionales.
+  const interesesProfesionales = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
+  
+  const prompt = `
+    👁️ Analista senior. Intereses: ${interesesProfesionales}
+    Escoge 4 titulares. Para cada uno, escribe solo el titular y un resumen de 120-140 caracteres.
+    Titulares:
+    ${heads.map(h => `${h.id}: ${h.title}`).join('\n')}
+  `;
+
+  let out = await askAI(prompt, 700, 0.7);
+  heads.forEach(h => {
+    out = out.replace(`[Fuente ${h.id}]`, `[Ver fuente](${h.link})`);
+  });
+
+  cache.set(key, out, 3600);
+  return out;
+}
 /* ─── Horóscopo Supremo ─────────────────────────────────────────── */
 async function getHoroscopo() {
   const key='horoscopo';
@@ -598,78 +711,73 @@ ${drafts}
   return final;
 }
 
-/* ─── Bonus Track ───────────────────────────────────────────────── */
+//======================================================================
+// FUNCIÓN BONUS TRACK - VERSIÓN 2.1 (FORMATO: TÍTULO + RESUMEN + LINK)
+//======================================================================
+/* ─── Bonus Track (Usa Intereses Personales) ───────────────── */
 async function bonusTrack() {
-  const key='bonusTrack';
-  if (cache.has(key)) return cache.get(key);
-  const FEEDS = [
-    'https://aeon.co/feed.rss','https://psyche.co/feed','https://www.noemamag.com/feed/',
-    'https://longnow.org/ideas/feed/','https://www.the-tls.co.uk/feed/','https://laphamsquarterly.org/rss.xml',
-    'https://www.nybooks.com/feed/','https://thepointmag.com/feed/','https://thebaffler.com/feed',
-    'https://quillette.com/feed/','https://palladiummag.com/feed/','https://nautil.us/feed/',
-    'https://www.quantamagazine.org/feed/','https://www.technologyreview.com/feed/',
-    'https://arstechnica.com/science/feed/','https://www.wired.com/feed/category/science/latest/rss',
-    'https://stratechery.com/feed/','https://knowingneurons.com/feed/','https://longreads.com/feed/',
-    'https://getpocket.com/explore/rss','https://publicdomainreview.org/feed/',
-    'https://daily.jstor.org/feed/','https://bigthink.com/feed/',
-    'https://sidebar.io/feed.xml','https://elgatoylacaja.com/feed/','https://ethic.es/feed/',
-    'https://principia.io/feed/','https://ctxt.es/es/rss.xml','https://elpais.com/rss/cultura.xml',
-    'https://hipertextual.com/feed','https://www.bbvaopenmind.com/en/feed/'
-  ];
-  const parser = new XMLParser({ignoreAttributes:false,attributeNamePrefix:'@_'});
-  const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
-  const items = xmls.flatMap(x=>{
-    const f=parser.parse(x);
-    return f.rss?f.rss.channel.item:f.feed?f.feed.entry:[];
-  }).filter(Boolean);
-  // barajar
-  for (let i=items.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [items[i],items[j]]=[items[j],items[i]];
-  }
-  // buscar link válido
-const linkOk = async url => {
-  if (!url) return false;
-  try {
-    const ctrl = new AbortController();
-    // Aumentar el tiempo de espera a 8 segundos
-    const id = setTimeout(() => ctrl.abort(), 8000); 
-    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
-    clearTimeout(id);
-    return r.ok;
-  } catch {
-    return false;
-  }
-};
-  let pick=null;
-  for(const it of items.slice(0,40)){
-    const link=typeof it.link==='string'?it.link:it.link?.['@_href']||it.link?.['@_url'];
-    if(await linkOk(link)){ pick={title:it.title,link}; break; }
-  }
-  if(!pick) {
-    // Respuesta de respaldo si no se encuentra ningún artículo válido
-    const fallbackFacts = [
-        "El término 'geek' fue creado para referirse a artistas de circo que hacían espectáculos extraños, como arrancar la cabeza de gallinas vivas.",
-        "El corazón humano tiene la misma fuerza que puede impulsar la sangre hasta tres pisos de altura.",
-        "Las hormigas pueden levantar hasta 50 veces su propio peso y arrastrar 30 veces su peso.",
-        "El ojo del avestruz es más grande que su cerebro.",
-        "Los osos polares tienen la piel negra para absorber mejor el calor del sol."
-    ];
-    const randomFact = fallbackFacts[Math.floor(Math.random() * fallbackFacts.length)];
-    return `🎁 **Bonus Track: Dato Curioso**\n${randomFact}`;
-}
+  const key = 'bonusTrack';
+  if (cache.has(key)) return cache.get(key);
+  
+  const FEEDS = [
+    'https://www.wired.com/feed/rss', 'https://www.theverge.com/rss/index.xml',
+    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
+    'https://restofworld.org/feed/latest/', 'https://arstechnica.com/science/feed/',
+    'https://aeon.co/feed.rss', 'https://psyche.co/feed',
+    'https://www.noemamag.com/feed/', 'https://longreads.com/feed/',
+    'https://getpocket.com/explore/rss', 'https://sidebar.io/feed.xml',
+    'https://elgatoylacaja.com/feed/', 'https://hipertextual.com/feed'
+  ];
 
-  const prompt = `
-🔍 Ensayo: «${pick.title}».
-1. Resume en 2-3 líneas su valor para un profesional ocupado.
-2. Relaciónalo con filosofía, ciencia, tecnología, cine, televisión, cultura pop o historia.
-3. Cierra con una pregunta provocadora.
-4. Termina con (leer).
-`;
-  let txt = await askAI(prompt,200,0.75);
-  txt = txt.replace('(leer)',`(leer)(${pick.link})`);
-  cache.set(key,txt,86400);
-  return txt;
+  try {
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+    const xmls = (await Promise.all(FEEDS.map(fetchSafe))).filter(Boolean);
+    const items = xmls.flatMap(x => {
+      const f = parser.parse(x);
+      return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
+    }).filter(Boolean);
+
+    for (let i = items.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [items[i], items[j]] = [items[j], items[i]];
+    }
+
+    const candidates = items.slice(0, 20).map((it, i) => ({
+      id: i + 1,
+      title: it.title,
+      link: typeof it.link === 'string' ? it.link : it.link?.['@_href']
+    })).filter(c => c.link && c.title);
+
+    if (candidates.length === 0) throw new Error("No se encontraron candidatos de artículos válidos.");
+
+    // Usa la función getInteresesBonus() que lee la hoja de hobbies/temas personales.
+    const interesesPersonales = (await getInteresesBonus()).join(', ');
+    if (!interesesPersonales) throw new Error("No se encontraron intereses en la hoja 'InteresesBonus'.");
+
+    const prompt = `
+      Eres un editor experto en contenido para redes sociales. Tu especialidad es la concisión.
+      Basado en los intereses de tu cliente (${interesesPersonales}), elige el artículo MÁS interesante de la siguiente lista.
+
+      Tu respuesta debe seguir ESTRICTAMENTE el siguiente formato, sin añadir texto introductorio ni despedidas:
+      *<TÍTULO DEL ARTÍCULO ORIGINAL>*
+      <RESUMEN DE MÁXIMO 140 CARACTERES>
+      [Leer más](<URL_DEL_ARTÍCULO>)
+
+      Lista de artículos candidatos:
+      ${candidates.map(c => `- Título: ${c.title}\n  URL: ${c.link}`).join('\n\n')}
+    `;
+
+    const finalBonus = await askAI(prompt, 200, 0.7);
+    if (finalBonus.startsWith('[') && finalBonus.endsWith(']')) throw new Error(`La IA falló: ${finalBonus}`);
+
+    cache.set(key, finalBonus, 21600);
+    return finalBonus;
+
+  } catch (e) {
+    console.error('Error CRÍTICO en bonusTrack:', e.message);
+    const fallbackFacts = ["Los pulpos tienen tres corazones y su sangre es azul."];
+    return `*Dato Curioso*\n${fallbackFacts[0]}`;
+  }
 }
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
@@ -711,9 +819,9 @@ const analisis = await askAI(promptCoach,350,0.7);
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
     banner('Análisis Estratégico','🧠'), analisis,
     banner('Clima','🌦️'), clima,
-    banner('Agenda','📅'), agendaList.join('\n')||'_(Sin eventos)_',
-    banner('Pendientes Críticos','🔥'), pendientesList.join('\n')||'_(Sin pendientes)_',
-    banner('Tu Misión Principal (Big Rock)','🚀'), bigRocks.join('\n')||'_(No definido)_',
+    banner('Agenda','📅'), agendaList.join('\n') || '_(Sin eventos)_',
+    banner('Pendientes Críticos','🔥'), pendientesList.join('\n') || '_(Sin pendientes activos)_', // <-- Ahora esto funciona consistentemente
+    banner('Tu Misión Principal (Big Rock)','🚀'), bigRocks.join('\n') || '_(No definido)_',
     banner('Radar Inteligencia Global','🌍'), intel,
     banner('Horóscopo (Libra)','🔮'), horo,
     banner('Bonus Track','🎁'), bonus
@@ -732,33 +840,42 @@ async function getSystemStatus() {
     checks.map(r=> r.status==='fulfilled'? r.value : `❌ ${r.reason.message}`).join('\n');
 }
 
-/* ─── Command Router ───────────────────────────────────────────── */
-async function router(msg) {
-  const [cmd,...rest] = (msg.text||'').trim().split(' ');
-  const arg = rest.join(' ').trim();
-  switch(cmd) {
-    case '/start':
-    case '/help':
-      return '*JOYA* comandos:\n/brief\n/briefcompleto\n/addrock <t>\n/removerock <t>\n/addinteres <t>\n/removeinteres <t>\n/status';
-    case '/brief':
-      return await briefShort();
-    case '/briefcompleto':
-      return await briefFull();
-    case '/status':
-      return await getSystemStatus();
-    case '/addrock':
-      return arg ? await addUnique('BigRocks', arg) : '✏️ Falta la tarea.';
-    case '/removerock':
-      return arg ? await removeRow('BigRocks', arg) : '✏️ Falta la tarea a eliminar.';
-    case '/addinteres':
-      return arg ? await addUnique('Intereses', arg) : '✏️ Falta el interés.';
-    case '/removeinteres':
-      return arg ? await removeRow('Intereses', arg) : '✏️ Falta el interés a eliminar.';
-    default:
-      return '🤖 Comando no reconocido. Usa /help';
-  }
-}
+/* ─── Command Router (Versión Refactorizada) ────────────────── */
 
+// 1. Objeto que mapea cada comando a la función que debe ejecutar.
+const commands = {
+  '/brief': briefShort,
+  '/briefcompleto': briefFull,
+  '/status': getSystemStatus,
+  '/addrock': (arg) => arg ? addUnique('BigRocks', arg) : '✏️ Falta la tarea.',
+  '/removerock': (arg) => arg ? findAndRemoveWithAI('BigRocks', arg) : '✏️ ¿Qué tarea quieres eliminar?',
+  '/addinteres': (arg) => arg ? addUnique('Intereses', arg) : '✏️ Falta el interés.',
+  '/removeinteres': (arg) => arg ? findAndRemoveWithAI('Intereses', arg) : '✏️ ¿Qué interés quieres eliminar?',
+  // Puedes añadir aquí comandos para los intereses del bonus track si lo deseas
+};
+
+// 2. La nueva función router, más limpia y escalable.
+async function router(msg) {
+  const [cmd, ...rest] = (msg.text || '').trim().split(' ');
+  const arg = rest.join(' ').trim();
+
+  // Manejo especial para /start y /help, que ahora genera la ayuda automáticamente.
+  if (cmd === '/start' || cmd === '/help') {
+    const commandList = Object.keys(commands).join('\n');
+    return `*Asistente JOYA · Comandos Disponibles*\n──────────────\n${commandList}`;
+  }
+
+  const commandFunction = commands[cmd];
+
+  // Si el comando existe en nuestro objeto, lo ejecutamos.
+  if (commandFunction) {
+    // Le pasamos el argumento (arg) a la función correspondiente.
+    return await commandFunction(arg);
+  }
+  
+  // Si el comando no se encuentra, devolvemos un mensaje de error.
+  return '🤖 Comando no reconocido. Usa /help para ver la lista de comandos.';
+}
 /* ─── Webhook & Server ─────────────────────────────────────────── */
 app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
   res.sendStatus(200);
@@ -781,3 +898,10 @@ app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
 
 app.get('/healthz', (_,res) => res.send('ok'));
 app.listen(PORT, ()=> console.log(`🚀 Joya Ultimate escuchando en puerto ${PORT}`));
+
+/**
+ * Encuentra un item en una hoja de cálculo usando IA para fuzzy matching y lo elimina.
+ * @param {string} sheetName El nombre de la hoja (ej. 'BigRocks').
+ * @param {string} userQuery El texto parcial que el usuario proveyó (ej. 'tratado').
+ * @returns {Promise<string>} Un mensaje de confirmación o error.
+ */
