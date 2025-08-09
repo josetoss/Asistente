@@ -1,13 +1,23 @@
 {
+  "name": "asistente-joya-ultimate",
+  "version": "2025.8.0",
+  "description": "Asistente personal y profesional para Telegram desplegado en Render.",
   "type": "module",
-  "engines": { "node": "18.x" },
-  "scripts": { "start": "node index.js" },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
-    "node-cache": "^5.1.2",
     "luxon": "^3.4.4",
-    "fast-xml-parser": "^4.4.2"
-    "node-ical": "^0.16.0" 
-  }
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2",
+    "fast-xml-parser": "^4.4.0",
+    "node-ical": "^0.16.0"
+  },
+  "author": "Joya-Ultimate",
+  "license": "MIT"
 }
