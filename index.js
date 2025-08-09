@@ -10,6 +10,7 @@ import fetchPkg from 'node-fetch';
 import { google } from 'googleapis';
 import { DateTime } from 'luxon';
 import { XMLParser } from 'fast-xml-parser';
+import ical from 'node-ical';
 const singleton = fn => {
   let inst;
   return (...args) => inst ?? (inst = fn(...args));
@@ -388,114 +389,59 @@ async function getInteresesBonus() {
   }
 }
 
+// REEMPLAZA TU getAgenda() CON ESTA VERSIÓN iCal
 async function getAgenda() {
-  const cacheKey = 'agenda_diagnostico';
+  const cacheKey = 'agenda_ical_separada';
   if (cache.has(cacheKey)) return cache.get(cacheKey);
-  
-  console.log('Ejecutando getAgenda en MODO DIAGNÓSTICO...');
 
-  try {
-    const cal = await calendarClient();
+  const urlPersonal = process.env.GCAL_ICAL_URL_PERSONAL;
+  const urlProfesional = process.env.GCAL_ICAL_URL_PROFESIONAL;
+
+  // Función auxiliar para procesar una URL de iCal
+  const procesarURL = async (url) => {
+    if (!url) return []; // Si la URL no está definida, devuelve una lista vacía
     
-    // PASO DE DIAGNÓSTICO: Listar todos los calendarios a los que el bot tiene acceso.
-    const res = await cal.calendarList.list();
-    const calendars = res.data.items;
+    const events = await ical.async.fromURL(url);
+    const todayStart = DateTime.local().setZone('America/Santiago').startOf('day');
+    const todayEnd = DateTime.local().setZone('America/Santiago').endOf('day');
+    const todaysEvents = [];
 
-    if (!calendars || calendars.length === 0) {
-      console.log('DIAGNÓSTICO: El bot se conectó, pero no tiene acceso a NINGÚN calendario.');
-      return ['El bot no tiene acceso a ningún calendario. Verifica las credenciales y el uso compartido.'];
-    }
-
-    // Si llegamos aquí, el bot SÍ tiene permisos. Mostramos lo que ve.
-    console.log(`DIAGNÓSTICO: El bot tiene acceso a ${calendars.length} calendario(s):`);
-    calendars.forEach(c => console.log(`- ${c.summary} (ID: ${c.id})`));
-
-    // Ahora, intentamos leer los eventos de tu calendario específico por su ID.
-    const miCalendario = calendars.find(c => c.summary === 'jose tomas serrano');
-    if (!miCalendario) {
-      return [`DIAGNÓSTICO: El bot puede ver otros calendarios, pero no "jose tomas serrano". Revisa el uso compartido de ese calendario en específico.`];
-    }
-    
-    const tz = 'America/Santiago';
-    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
-    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
-    
-    const eventsRes = await cal.events.list({
-      calendarId: miCalendario.id, // Usamos el ID para ser precisos
-      timeMin: todayStart,
-      timeMax: todayEnd,
-      singleEvents: true,
-      orderBy: 'startTime'
-    });
-
-    const events = eventsRes.data.items || [];
-    const lines = events.map(e => {
-      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, { zone: tz }).toFormat('HH:mm') : 'Todo el día';
-      return `• ${hora} – ${e.summary || '(sin título)'}`;
-    });
-    
-    cache.set(cacheKey, lines, 30); // Cache corto para diagnóstico
-    return lines;
-
-  } catch (e) {
-    console.error('getAgenda error:', e.message);
-    if (e.message.includes('Insufficient Permission')) {
-      return ['❌ Error de Permiso Persistente. La causa más probable son las credenciales (GOOGLE_CREDENTIALS) incorrectas en Render. Por favor, re-genera y re-configura esa variable de entorno.'];
-    }
-    return [`(Error al obtener la agenda: ${e.message})`];
-  }
-}
-
-/* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
-async function addWorkAgendaToPersonalCalendar() {
-  const key='syncAgenda';
-  if (cache.has(key)) return;
-  try {
-    if (!AGENDA_SHEET_ID) return;
-    const sheets = await sheetsClient();
-    const cal = await calendarClient();
-    const IMPORT_NAME = 'Agenda oficina (importada)';
-    const list = await cal.calendarList.list();
-    let buf = list.data.items.find(c=>c.summary===IMPORT_NAME);
-    if (!buf) {
-      const nc = await cal.calendars.insert({resource:{summary:IMPORT_NAME}});
-      buf = nc.data;
-    }
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: AGENDA_SHEET_ID, range:'Hoja 1!A2:C'
-    });
-    const rows = res.data.values||[];
-    const tz   = 'America/Santiago';
-    const day0 = DateTime.local().setZone(tz).startOf('day');
-    const day1 = DateTime.local().setZone(tz).endOf('day');
-    const exist = await cal.events.list({
-      calendarId: buf.id,
-      timeMin: day0.toISO(),
-      timeMax: day1.toISO(),
-      singleEvents: true
-    });
-    const seen = new Set((exist.data.items||[]).map(ev=>`${ev.summary}@${ev.start.dateTime}`));
-    for (const [title,startRaw,endRaw] of rows) {
-      if (!title||!startRaw) continue;
-      const start = DateTime.fromJSDate(new Date(startRaw),{zone:tz});
-      const end   = endRaw
-        ? DateTime.fromJSDate(new Date(endRaw),{zone:tz})
-        : start.plus({minutes:30});
-      const keyEv = `${title}@${start.toISO()}`;
-      if (!seen.has(keyEv) && !title.toLowerCase().includes('office')) {
-        await cal.events.insert({
-          calendarId: buf.id,
-          resource:{
-            summary: title,
-            start: {dateTime:start.toISO(), timeZone:tz},
-            end:   {dateTime:end.toISO(),   timeZone:tz}
-          }
-        });
+    for (const event of Object.values(events)) {
+      if (event.type === 'VEVENT') {
+        const start = DateTime.fromJSDate(event.start).setZone('America/Santiago');
+        if (start >= todayStart && start <= todayEnd) {
+          todaysEvents.push({ summary: event.summary, start: start });
+        }
       }
     }
-    cache.set(key,true,3600);
-  } catch(e) {
-    console.error('addWorkAgenda error:', e.message);
+    return todaysEvents;
+  };
+
+  try {
+    // Hacemos ambas llamadas en paralelo para máxima eficiencia
+    const [eventosPersonales, eventosProfesionales] = await Promise.all([
+      procesarURL(urlPersonal),
+      procesarURL(urlProfesional)
+    ]);
+
+    // Función auxiliar para formatear la lista de eventos
+    const formatEventList = (eventList) => {
+      if (!eventList || eventList.length === 0) return [];
+      eventList.sort((a, b) => a.start - b.start);
+      return eventList.map(e => `• ${e.start.toFormat('HH:mm')} – ${e.summary || '(sin título)'}`);
+    };
+    
+    const agendaData = {
+      personal: formatEventList(eventosPersonales),
+      profesional: formatEventList(eventosProfesionales)
+    };
+
+    cache.set(cacheKey, agendaData, 300);
+    return agendaData;
+
+  } catch (e) {
+    console.error('getAgenda (iCal múltiple) error:', e.message);
+    return { personal: [], profesional: [`(Error al leer iCal: ${e.message})`] };
   }
 }
 
@@ -792,53 +738,94 @@ async function bonusTrack() {
 }
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
-  const [clima, bigRocks, agendaList, pendientesList] = await Promise.all([
-    getWeather(), getBigRocks(), getAgenda(), getPendientes()
+  // Obtenemos todos los datos en paralelo
+  const [clima, bigRocks, agendaData, pendientesList] = await Promise.all([
+    getWeather(), 
+    getBigRocks(), 
+    getAgenda(), // Devuelve { personal: [], profesional: [] }
+    getPendientes()
   ]);
+
+  // Lógica para unir las agendas para el resumen
+  const agendaUnificada = [...agendaData.profesional, ...agendaData.personal];
+  
   return [
     '⚡️ *Resumen Rápido*',
-    banner('Clima','🌦️'), clima,
-    banner('Misión Principal (Big Rock)','🚀'), bigRocks.join('\n')||'_(No definido)_',
-    banner('Focos Críticos (Pendientes)','🔥'), pendientesList.join('\n')||'_(Sin pendientes)_',
-    banner('Agenda del Día','📅'), agendaList.join('\n')||'_(Sin eventos)_'
+    banner('Clima','🌦️'), 
+    clima,
+    banner('Misión Principal (Big Rock)','🚀'), 
+    bigRocks.length > 0 ? bigRocks.join('\n') : '_(No definido)_',
+    banner('Focos Críticos (Pendientes)','🔥'), 
+    pendientesList.length > 0 ? pendientesList.join('\n') : '_(Sin pendientes)_',
+    banner('Agenda del Día','📅'), 
+    agendaUnificada.length > 0 ? agendaUnificada.join('\n') : '_(Sin eventos)_'
   ].join('\n\n');
 }
-
 async function briefFull() {
-  await addWorkAgendaToPersonalCalendar();
-  const [clima, agendaList, pendientesList, bigRocks, intel, horo, bonus] = await Promise.all([
-    getWeather(), getAgenda(), getPendientes(), getBigRocks(), intelGlobal(), getHoroscopo(), bonusTrack()
+  // await addWorkAgendaToPersonalCalendar(); // <-- Confirmamos que esta línea está inactiva
+  
+  const [clima, agendaData, pendientesList, bigRocks, intel, horo, bonus] = await Promise.all([
+    getWeather(), 
+    getAgenda(), // Devuelve { personal: [], profesional: [] }
+    getPendientes(), 
+    getBigRocks(), 
+    intelGlobal(), 
+    getHoroscopo(), 
+    bonusTrack()
   ]);
+
+  // --- Lógica para formatear la agenda en subsecciones ---
+  let agendaFormatted = '';
+  const profesionalEvents = agendaData.profesional || [];
+  const personalEvents = agendaData.personal || [];
+
+  // Siempre mostramos la sección profesional
+  agendaFormatted += `*Agenda Profesional:*\n`;
+  if (profesionalEvents.length > 0) {
+    agendaFormatted += profesionalEvents.join('\n');
+  } else {
+    agendaFormatted += '_(Sin eventos profesionales)_';
+  }
+
+  // Lógica CONDICIONAL para la agenda personal
+  if (personalEvents.length > 0) {
+    agendaFormatted += `\n\n*Agenda Personal:*\n`;
+    agendaFormatted += personalEvents.join('\n');
+  }
+  // ---------------------------------------------------
+
   const promptCoach = `
-⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal.
-Tu respuesta en 4 puntos, cada uno de no más de 55 caracteres.
-1. **Foco Principal:** ...
-2. **Riesgo a Mitigar:** ...
-3. **Acción Clave:** ...
-4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
----
-Agenda:
-${agendaList.join('\n')||'—'}
-Pendientes:
-${pendientesList.join('\n')||'—'}
-Big Rock:
-${bigRocks.join('\n')||'—'}
-`;
-const analisis = await askAI(promptCoach,350,0.7);
+    ⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal.
+    Tu respuesta en 4 puntos, cada uno de no más de 55 caracteres.
+    1. **Foco Principal:** ...
+    2. **Riesgo a Mitigar:** ...
+    3. **Acción Clave:** ...
+    4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
+    ---
+    Agenda Profesional:
+    ${profesionalEvents.join('\n') || '—'}
+    Agenda Personal:
+    ${personalEvents.join('\n') || '—'}
+    Pendientes:
+    ${pendientesList.join('\n') || '—'}
+    Big Rock:
+    ${bigRocks.join('\n') || '—'}
+  `;
+  const analisis = await askAI(promptCoach, 350, 0.7);
+
   return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
-    banner('Análisis Estratégico','🧠'), analisis,
-    banner('Clima','🌦️'), clima,
-    banner('Agenda','📅'), agendaList.join('\n') || '_(Sin eventos)_',
-    banner('Pendientes Críticos','🔥'), pendientesList.join('\n') || '_(Sin pendientes activos)_', // <-- Ahora esto funciona consistentemente
-    banner('Tu Misión Principal (Big Rock)','🚀'), bigRocks.join('\n') || '_(No definido)_',
-    banner('Radar Inteligencia Global','🌍'), intel,
-    banner('Horóscopo (Libra)','🔮'), horo,
-    banner('Bonus Track','🎁'), bonus
+    banner('Análisis Estratégico', '🧠'), analisis,
+    banner('Clima', '🌦️'), clima,
+    banner('Agenda', '📅'), agendaFormatted, // Usamos nuestra nueva variable formateada
+    banner('Pendientes Críticos', '🔥'), pendientesList.length > 0 ? pendientesList.join('\n') : '_(Sin pendientes activos)_',
+    banner('Tu Misión Principal (Big Rock)', '🚀'), bigRocks.length > 0 ? bigRocks.join('\n') : '_(No definido)_',
+    banner('Radar Inteligencia Global', '🌍'), intel,
+    banner('Horóscopo (Libra)', '🔮'), horo,
+    banner('Bonus Track', '🎁'), bonus
   ].join('\n\n');
 }
-
 /* ─── Estado del Sistema ───────────────────────────────────────── */
 async function getSystemStatus() {
   const checks = await Promise.allSettled([
