@@ -388,55 +388,64 @@ async function getInteresesBonus() {
   }
 }
 
-
 async function getAgenda() {
-  const cacheKey = 'agenda';
-  if (cache.has(cacheKey)) return cache.get(cacheKey);
-  try {
-    const cal = await calendarClient();
-    const {
-      data: {
-        items: calendars
-      }
-    } = await cal.calendarList.list();
-    // === Cambio aquí: de 'exclude' a 'include' ===
-    const include = ['jose tomas serrano', 'agenda oficina (importada)'];
-    const tz = 'America/Santiago';
-    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
-    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
-    const eventLists = await Promise.all(
-      calendars
-      // === Filtramos solo los calendarios que están en la lista 'include' ===
-      .filter(c => c.selected !== false && include.some(x => c.summary?.toLowerCase() === x))
-      .map(c => cal.events.list({
-        calendarId: c.id,
-        timeMin: todayStart,
-        timeMax: todayEnd,
-        singleEvents: true,
-        orderBy: 'startTime'
-      }))
-    );
-    const allEvents = eventLists
-      .flatMap(r => r.data.items || [])
-      .sort((a, b) => {
-        const tA = new Date(a.start.dateTime || a.start.date).getTime();
-        const tB = new Date(b.start.dateTime || b.start.date).getTime();
-        return tA - tB;
-      });
-    const lines = allEvents.map(e => {
-      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, {
-        zone: tz
-      }).toFormat('HH:mm') : 'Todo el día';
-      const calName = calendars.find(c => c.id === e.organizer?.email)?.summary || calendars.find(c => c.id === e.calendarId)?.summary || 'Evento';
-      return `• [${calName}] ${hora} – ${e.summary || '(sin título)'}`;
-    });
-    cache.set(cacheKey, lines, 300);
-    return lines;
-  } catch (e) {
-    console.error('getAgenda error:', e.message);
-      return ['(Error al obtener la agenda)'];
-  }
+  const cacheKey = 'agenda_diagnostico';
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  
+  console.log('Ejecutando getAgenda en MODO DIAGNÓSTICO...');
+
+  try {
+    const cal = await calendarClient();
+    
+    // PASO DE DIAGNÓSTICO: Listar todos los calendarios a los que el bot tiene acceso.
+    const res = await cal.calendarList.list();
+    const calendars = res.data.items;
+
+    if (!calendars || calendars.length === 0) {
+      console.log('DIAGNÓSTICO: El bot se conectó, pero no tiene acceso a NINGÚN calendario.');
+      return ['El bot no tiene acceso a ningún calendario. Verifica las credenciales y el uso compartido.'];
+    }
+
+    // Si llegamos aquí, el bot SÍ tiene permisos. Mostramos lo que ve.
+    console.log(`DIAGNÓSTICO: El bot tiene acceso a ${calendars.length} calendario(s):`);
+    calendars.forEach(c => console.log(`- ${c.summary} (ID: ${c.id})`));
+
+    // Ahora, intentamos leer los eventos de tu calendario específico por su ID.
+    const miCalendario = calendars.find(c => c.summary === 'jose tomas serrano');
+    if (!miCalendario) {
+      return [`DIAGNÓSTICO: El bot puede ver otros calendarios, pero no "jose tomas serrano". Revisa el uso compartido de ese calendario en específico.`];
+    }
+    
+    const tz = 'America/Santiago';
+    const todayStart = DateTime.local().setZone(tz).startOf('day').toISO();
+    const todayEnd = DateTime.local().setZone(tz).endOf('day').toISO();
+    
+    const eventsRes = await cal.events.list({
+      calendarId: miCalendario.id, // Usamos el ID para ser precisos
+      timeMin: todayStart,
+      timeMax: todayEnd,
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+
+    const events = eventsRes.data.items || [];
+    const lines = events.map(e => {
+      const hora = e.start.dateTime ? DateTime.fromISO(e.start.dateTime, { zone: tz }).toFormat('HH:mm') : 'Todo el día';
+      return `• ${hora} – ${e.summary || '(sin título)'}`;
+    });
+    
+    cache.set(cacheKey, lines, 30); // Cache corto para diagnóstico
+    return lines;
+
+  } catch (e) {
+    console.error('getAgenda error:', e.message);
+    if (e.message.includes('Insufficient Permission')) {
+      return ['❌ Error de Permiso Persistente. La causa más probable son las credenciales (GOOGLE_CREDENTIALS) incorrectas en Render. Por favor, re-genera y re-configura esa variable de entorno.'];
+    }
+    return [`(Error al obtener la agenda: ${e.message})`];
+  }
 }
+
 /* ─── Sincronizar Agenda Oficina → Calendar ─────────────────────── */
 async function addWorkAgendaToPersonalCalendar() {
   const key='syncAgenda';
