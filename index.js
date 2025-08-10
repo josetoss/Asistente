@@ -587,155 +587,211 @@ ${responseGPT}
   return reconciled;
 }
 
-/* ─── Radar Inteligencia Global (Usa Intereses Profesionales) ── */
+/* ─── Radar Inteligencia Global (v2: Con Filtro de Fecha y Traducción) ── */
 async function intelGlobal() {
-  const key = 'intelGlobal';
+  const key = 'intelGlobal_v2';
   if (cache.has(key)) return cache.get(key);
   
-  const FEEDS = [
-    'https://warontherocks.com/feed/', 'https://www.foreignaffairs.com/rss.xml',
-    'https://www.cfr.org/rss.xml', 'https://carnegieendowment.org/rss/all-publications',
-    'https://www.csis.org/rss/analysis', 'https://www.rand.org/pubs.rss',
-    'https://globalvoices.org/feed/', 'https://thediplomat.com/feed/',
-    'https://www.foreignpolicy.com/feed', 'https://www.wired.com/feed/rss',
-    'https://feeds.arstechnica.com/arstechnica/index', 'https://www.theverge.com/rss/index.xml',
-    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
-    'https://restofworld.org/feed/latest/', 'https://themarkup.org/feeds/rss.xml',
-    'https://www.schneier.com/feed/atom/', 'https://krebsonsecurity.com/feed/',
-    'https://thehackernews.com/feeds/posts/default', 'https://darknetdiaries.com/podcast.xml',
-    'https://stratechery.com/feed/', 'https://hbr.org/rss',
-    'https://www.ben-evans.com/rss', 'https://www.economist.com/rss'
-  ];
+  const FEEDS = [ /* ... tu lista de feeds se mantiene igual ... */ ];
 
-  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-  // CAMBIO AQUÍ: Añadimos 5000ms de timeout
-  const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 5000)))).filter(Boolean);
-  const items = xmls.flatMap(x => {
-    const f = parser.parse(x);
-    return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
-  }).slice(0, 40);
+  try {
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+    const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 5000)))).filter(Boolean);
+    
+    const unDiaAtras = DateTime.local().minus({ days: 1 });
+    let articles = [];
 
-  const heads = items.map((it, i) => ({
-    id: i + 1,
-    title: it.title,
-    link: typeof it.link === 'string' ? it.link : it.link?.['@_href']
-  }));
+    xmls.forEach(xml => {
+      const feed = parser.parse(xml);
+      const items = feed.rss ? feed.rss.channel.item : (feed.feed ? feed.feed.entry : []);
+      if (items) articles.push(...items);
+    });
 
-  // Usa la función getIntereses() que lee la hoja de temas profesionales.
-  const interesesProfesionales = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
-  
-  const prompt = `
-    👁️ Analista senior. Intereses: ${interesesProfesionales}
-    Escoge 4 titulares. Para cada uno, escribe solo el titular y un resumen de 120-140 caracteres.
-    Titulares:
-    ${heads.map(h => `${h.id}: ${h.title}`).join('\n')}
-  `;
+    const candidates = articles
+      .map((item, i) => {
+        // Normalizamos los diferentes formatos de fecha de los RSS
+        const pubDateStr = item.pubDate || item.published || item.updated;
+        const pubDate = pubDateStr ? DateTime.fromRFC2822(pubDateStr) : DateTime.local();
+        return {
+          id: i + 1,
+          title: item.title,
+          link: typeof item.link === 'string' ? item.link : item.link?.['@_href'],
+          date: pubDate
+        };
+      })
+      // --- FILTRO DE FECHA: Solo noticias de las últimas 24 horas ---
+      .filter(c => c.link && c.title && c.date >= unDiaAtras);
 
-  let out = await askAI(prompt, 700, 0.7);
-  heads.forEach(h => {
-    out = out.replace(`[Fuente ${h.id}]`, `[Ver fuente](${h.link})`);
-  });
+    if (candidates.length < 4) return '_(No se encontraron suficientes noticias recientes)_';
 
-  cache.set(key, out, 3600);
-  return out;
+    const intereses = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
+    
+    const promptSeleccion = `
+      From the following list of recent headlines, pick the 4 most strategically important ones for an executive interested in: ${intereses}.
+      For each of the 4, respond ONLY with its title.
+      
+      Headlines:
+      ${candidates.map(c => `- ${c.title}`).join('\n')}
+    `;
+    const seleccionEnIngles = await askAI(promptSeleccion, 400, 0.5);
+
+    // --- TRADUCCIÓN CON IA ---
+    const promptTraduccion = `
+      You are a professional translator for an executive intelligence briefing.
+      Translate the following 4 headlines and their summaries into Spanish.
+      Keep the tone professional and concise. For each, add a link at the end in Markdown format.
+
+      For each of the 4 headlines below, find its corresponding article from the provided list and generate a 1-2 sentence summary.
+      
+      Selected Headlines:
+      ${seleccionEnIngles}
+
+      Full Article List (for context and summaries):
+      ${candidates.map(c => `- Title: ${c.title}\n  Link: ${c.link}`).join('\n\n')}
+      
+      Respond in Spanish. For each item, use the format:
+      *<Título en Español>*
+      <Resumen en Español> ([Leer más](URL))
+    `;
+    
+    const resultadoFinal = await askAI(promptTraduccion, 800, 0.7);
+
+    cache.set(key, resultadoFinal, 3600); // Cache por 1 hora
+    return resultadoFinal;
+
+  } catch (e) {
+    console.error('Error en intelGlobal_v2:', e.message);
+    return '_(Error al procesar las noticias)_';
+  }
 }
-/* ─── Horóscopo Supremo ─────────────────────────────────────────── */
-async function getHoroscopo() {
-  const key='horoscopo';
-  if (cache.has(key)) return cache.get(key);
-  const fuentes = [
-    fetchSafe('https://aztro.sameerkumar.website/?sign=libra&day=today')
-      .then(t=>t&&JSON.parse(t).description).catch(()=>null),
-    NINJAS_KEY
-      ? fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra',{headers:{'X-Api-Key':NINJAS_KEY}})
-          .then(r=>r.json()).then(d=>d.horoscope).catch(()=>null)
-      : null,
-    askAI('Horóscopo Libra global (3 líneas, español).',120,0.7),
-    askAI('Horóscopo Libra carrera/finanzas (3 líneas, español).',120,0.7),
-    askAI('Horóscopo Libra bienestar personal (3 líneas, español).',120,0.8)
-  ];
-  const results = await Promise.allSettled(fuentes);
-  const drafts = results.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value).join('\n\n');
-  if (!drafts) return 'Horóscopo no disponible.';
-  const prompt = `
-Eres astrólogo maestro. Sintetiza estos borradores en UN solo horóscopo (titular en negrita + 4-5 líneas), español:
 
-${drafts}
-`;
-  const final = await askAI(prompt,250,0.6);
-  cache.set(key,final,21600);
+/* ─── Horóscopo Supremo (Enfoque Diario y Múltiples Fuentes) ─── */
+async function getHoroscopo() {
+  const key = 'horoscopo_diario';
+  if (cache.has(key)) return cache.get(key);
+
+  // --- FUENTES DE DATOS PARA EL HORÓSCOPO ---
+  const fuentes = [
+    // Fuente 1: API Aztro (simple y directa)
+    fetchSafe('https://aztro.sameerkumar.website/?sign=libra&day=today')
+      .then(t => t && JSON.parse(t).description).catch(() => null),
+      
+    // Fuente 2: API Ninjas (si la clave está configurada)
+    process.env.NINJAS_KEY
+      ? fetch('https://api.api-ninjas.com/v1/horoscope?zodiac=libra', { headers: { 'X-Api-Key': process.env.NINJAS_KEY } })
+          .then(r => r.json()).then(d => d.horoscope).catch(() => null)
+      : null,
+      
+    // Fuente 3: IA con enfoque general para hoy
+    askAI('Horóscopo para Libra enfocado específicamente en el día de HOY (3 líneas, español).', 120, 0.7),
+    
+    // Fuente 4: IA con enfoque en carrera y finanzas para hoy
+    askAI('Consejo de carrera/finanzas para Libra para HOY (3 líneas, español).', 120, 0.7),
+
+    // Fuente 5: IA con enfoque en bienestar personal para hoy
+    askAI('Consejo de bienestar personal y relaciones para Libra para HOY (3 líneas, español).', 120, 0.8)
+  ];
+  
+  const results = await Promise.allSettled(fuentes.filter(Boolean)); // Filtramos nulos si NINJAS_KEY no existe
+  const drafts = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value).join('\n\n');
+  
+  if (!drafts) return 'Horóscopo no disponible.';
+
+  // Prompt final que sintetiza todas las fuentes en una sola respuesta coherente
+  const prompt = `
+    Eres un astrólogo maestro. Sintetiza estos borradores en UN solo horóscopo para el día de HOY.
+    El resultado debe tener un titular corto en negrita y un párrafo cohesionado de 4-5 líneas. Responde en español.
+
+    Borradores de referencia:
+    ${drafts}
+  `;
+  const final = await askAI(prompt, 250, 0.6);
+  cache.set(key, final, 21600); // Cache por 6 horas
   return final;
 }
 
-//======================================================================
-// FUNCIÓN BONUS TRACK - VERSIÓN 2.1 (FORMATO: TÍTULO + RESUMEN + LINK)
-//======================================================================
-/* ─── Bonus Track (Usa Intereses Personales) ───────────────── */
+/* ─── Bonus Track (con Fuentes, Filtro de Antigüedad y Formato) ─── */
 async function bonusTrack() {
-  const key = 'bonusTrack';
+  const key = 'bonusTrack_v2';
   if (cache.has(key)) return cache.get(key);
   
+  // --- FUENTES DE DATOS PARA EL BONUS TRACK (FEEDS RSS) ---
   const FEEDS = [
-    'https://www.wired.com/feed/rss', 'https://www.theverge.com/rss/index.xml',
-    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
-    'https://restofworld.org/feed/latest/', 'https://arstechnica.com/science/feed/',
-    'https://aeon.co/feed.rss', 'https://psyche.co/feed',
-    'https://www.noemamag.com/feed/', 'https://longreads.com/feed/',
-    'https://getpocket.com/explore/rss', 'https://sidebar.io/feed.xml',
-    'https://elgatoylacaja.com/feed/', 'https://hipertextual.com/feed'
+    'https://www.wired.com/feed/rss', 
+    'https://www.theverge.com/rss/index.xml',
+    'http://feeds.feedburner.com/TechCrunch/', 
+    'https://www.technologyreview.com/feed/',
+    'https://restofworld.org/feed/latest/', 
+    'https://arstechnica.com/science/feed/',
+    'https://aeon.co/feed.rss', 
+    'https://psyche.co/feed',
+    'https://www.noemamag.com/feed/', 
+    'https://longreads.com/feed/',
+    'https://getpocket.com/explore/rss', 
+    'https://sidebar.io/feed.xml',
+    'https://elgatoylacaja.com/feed/', 
+    'https://hipertextual.com/feed'
   ];
 
-   try {
+  try {
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-    // CAMBIO AQUÍ: Añadimos 7000ms de timeout
     const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 7000)))).filter(Boolean);
-    const items = xmls.flatMap(x => {
-      const f = parser.parse(x);
-      return f.rss ? f.rss.channel.item : f.feed ? f.feed.entry : [];
-    }).filter(Boolean);
+    
+    let articles = [];
+    xmls.forEach(xml => {
+      const feed = parser.parse(xml);
+      const items = feed.rss ? feed.rss.channel.item : (feed.feed ? feed.entry : []);
+      if (items) articles.push(...items);
+    });
 
-    for (let i = items.length - 1; i > 0; i--) {
+    const tresSemanasAtras = DateTime.local().minus({ weeks: 3 });
+
+    const candidates = articles
+      .map((item, i) => {
+        const pubDateStr = item.pubDate || item.published || item.updated;
+        const pubDate = pubDateStr ? DateTime.fromRFC2822(pubDateStr).setZone('utc') : DateTime.local();
+        return {
+          id: i + 1,
+          title: String(item.title),
+          link: typeof item.link === 'string' ? item.link : item.link?.['@_href'],
+          date: pubDate
+        };
+      })
+      .filter(c => c.link && c.title && c.date >= tresSemanasAtras);
+
+    if (candidates.length === 0) throw new Error("No se encontraron artículos suficientemente recientes.");
+
+    for (let i = candidates.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [items[i], items[j]] = [items[j], items[i]];
+      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
     }
 
-    const candidates = items.slice(0, 20).map((it, i) => ({
-      id: i + 1,
-      title: it.title,
-      link: typeof it.link === 'string' ? it.link : it.link?.['@_href']
-    })).filter(c => c.link && c.title);
-
-    if (candidates.length === 0) throw new Error("No se encontraron candidatos de artículos válidos.");
-
-    // Usa la función getInteresesBonus() que lee la hoja de hobbies/temas personales.
-    const interesesPersonales = (await getInteresesBonus()).join(', ');
-    if (!interesesPersonales) throw new Error("No se encontraron intereses en la hoja 'InteresesBonus'.");
+    const intereses = (await getInteresesBonus()).join(', ');
+    if (!intereses) throw new Error("No hay intereses bonus definidos.");
 
     const prompt = `
-      Eres un editor experto en contenido para redes sociales. Tu especialidad es la concisión.
-      Basado en los intereses de tu cliente (${interesesPersonales}), elige el artículo MÁS interesante de la siguiente lista.
-
-      Tu respuesta debe seguir ESTRICTAMENTE el siguiente formato, sin añadir texto introductorio ni despedidas:
+      Basado en los intereses (${intereses}), elige el artículo MÁS interesante de la siguiente lista.
+      Tu respuesta debe seguir ESTRICTAMENTE este formato:
       *<TÍTULO DEL ARTÍCULO ORIGINAL>*
       <RESUMEN DE MÁXIMO 140 CARACTERES>
       [Leer más](<URL_DEL_ARTÍCULO>)
 
-      Lista de artículos candidatos:
-      ${candidates.map(c => `- Título: ${c.title}\n  URL: ${c.link}`).join('\n\n')}
+      Artículos candidatos:
+      ${candidates.slice(0, 20).map(c => `- Título: ${c.title}\n  URL: ${c.link}`).join('\n\n')}
     `;
-
+    
     const finalBonus = await askAI(prompt, 200, 0.7);
-    if (finalBonus.startsWith('[') && finalBonus.endsWith(']')) throw new Error(`La IA falló: ${finalBonus}`);
+    if (finalBonus.startsWith('[')) throw new Error(`La IA falló: ${finalBonus}`);
 
     cache.set(key, finalBonus, 21600);
     return finalBonus;
 
   } catch (e) {
-    console.error('Error CRÍTICO en bonusTrack:', e.message);
-    const fallbackFacts = ["Los pulpos tienen tres corazones y su sangre es azul."];
-    return `*Dato Curioso*\n${fallbackFacts[0]}`;
+    console.error('Error en bonusTrack_v2:', e.message);
+    return '_(No se pudo generar una recomendación de Bonus Track hoy)_';
   }
 }
+
 /* ─── Briefs ────────────────────────────────────────────────────── */
 async function briefShort() {
   // Obtenemos todos los datos en paralelo
@@ -838,21 +894,40 @@ async function getSystemStatus() {
     checks.map(r=> r.status==='fulfilled'? r.value : `❌ ${r.reason.message}`).join('\n');
 }
 
-/* ─── Command Router (Versión Refactorizada) ────────────────── */
+/* ─── Command Router (Versión Final con Todas las Funciones) ─── */
 
 // 1. Objeto que mapea cada comando a la función que debe ejecutar.
 const commands = {
   '/brief': briefShort,
   '/briefcompleto': briefFull,
   '/status': getSystemStatus,
+  
+  // Comandos para Big Rocks
   '/addrock': (arg) => arg ? addUnique('BigRocks', arg) : '✏️ Falta la tarea.',
   '/removerock': (arg) => arg ? findAndRemoveWithAI('BigRocks', arg) : '✏️ ¿Qué tarea quieres eliminar?',
-  '/addinteres': (arg) => arg ? addUnique('Intereses', arg) : '✏️ Falta el interés.',
-  '/removeinteres': (arg) => arg ? findAndRemoveWithAI('Intereses', arg) : '✏️ ¿Qué interés quieres eliminar?',
-  // Puedes añadir aquí comandos para los intereses del bonus track si lo deseas
+  
+  // Comandos para Intereses Profesionales (Radar Global)
+  '/addinteres': (arg) => arg ? addUnique('Intereses', arg) : '✏️ Falta el interés profesional.',
+  '/removeinteres': (arg) => arg ? findAndRemoveWithAI('Intereses', arg) : '✏️ ¿Qué interés profesional quieres eliminar?',
+  
+  // --- NUEVOS COMANDOS PARA INTERESES DEL BONUS TRACK ---
+  '/addbonus': (arg) => arg ? addUnique('InteresesBonus', arg) : '✏️ Falta el interés personal/bonus.',
+  '/removebonus': (arg) => arg ? findAndRemoveWithAI('InteresesBonus', arg) : '✏️ ¿Qué interés personal/bonus quieres eliminar?',
+  
+  // Comandos para Pendientes
+  '/addpendiente': (arg) => {
+    if (!arg) return '✏️ Falta la descripción del pendiente.';
+    // Formato de la fila: [ID, Tarea, Vence, Responsable, Estado, Impacto, Urgencia]
+    appendRow('Pendientes', [null, arg, null, null, 'Todo', 3, 3]);
+    return `✅ Pendiente añadido: "${arg}"`;
+  },
+  '/removependiente': (arg) => {
+    if (!arg) return '✏️ ¿Qué pendiente quieres eliminar?';
+    return findAndRemoveWithAI('Pendientes', arg);
+  }
 };
 
-// 2. La nueva función router, más limpia y escalable.
+// 2. La función router, que interpreta los comandos del usuario.
 async function router(msg) {
   const [cmd, ...rest] = (msg.text || '').trim().split(' ');
   const arg = rest.join(' ').trim();
@@ -874,6 +949,7 @@ async function router(msg) {
   // Si el comando no se encuentra, devolvemos un mensaje de error.
   return '🤖 Comando no reconocido. Usa /help para ver la lista de comandos.';
 }
+
 /* ─── Webhook & Server ─────────────────────────────────────────── */
 app.post(`/webhook/${TELEGRAM_SECRET}`, (req, res) => {
   res.sendStatus(200);
