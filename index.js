@@ -588,65 +588,80 @@ ${responseGPT}
 }
 
 /* ─── Radar Inteligencia Global (v2: Con Filtro de Fecha y Traducción) ── */
+/* ─── Radar Inteligencia Global (v2.1: Más Robusto) ── */
 async function intelGlobal() {
-  const key = 'intelGlobal_v2';
+  const key = 'intelGlobal_v2.1';
   if (cache.has(key)) return cache.get(key);
   
-  const FEEDS = [ /* ... tu lista de feeds se mantiene igual ... */ ];
+  const FEEDS = [
+    'https://warontherocks.com/feed/', 'https://www.foreignaffairs.com/rss.xml',
+    'https://www.cfr.org/rss.xml', 'https://carnegieendowment.org/rss/all-publications',
+    'https://www.csis.org/rss/analysis', 'https://www.rand.org/pubs.rss',
+    'https://www.foreignpolicy.com/feed', 'https://www.wired.com/feed/rss',
+    'https://feeds.arstechnica.com/arstechnica/index', 'https://www.theverge.com/rss/index.xml',
+    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
+    'https://restofworld.org/feed/latest/', 'https://hbr.org/rss',
+    'https://www.economist.com/rss'
+  ];
 
   try {
+    console.log('Iniciando intelGlobal...');
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
     const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 5000)))).filter(Boolean);
     
-    const unDiaAtras = DateTime.local().minus({ days: 1 });
     let articles = [];
-
     xmls.forEach(xml => {
       const feed = parser.parse(xml);
-      const items = feed.rss ? feed.rss.channel.item : (feed.feed ? feed.feed.entry : []);
+      const items = feed.rss ? feed.rss.channel.item : (feed.feed ? feed.entry : []);
       if (items) articles.push(...items);
     });
+    console.log(`- Total de artículos de RSS obtenidos: ${articles.length}`);
+
+    // --- FILTRO DE FECHA MEJORADO Y MÁS FLEXIBLE ---
+    const dosDiasAtras = DateTime.local().minus({ days: 2 }).startOf('day');
 
     const candidates = articles
       .map((item, i) => {
-        // Normalizamos los diferentes formatos de fecha de los RSS
-        const pubDateStr = item.pubDate || item.published || item.updated;
-        const pubDate = pubDateStr ? DateTime.fromRFC2822(pubDateStr) : DateTime.local();
+        const pubDateStr = item.pubDate || item.published || item.updated || item['dc:date'];
+        let pubDate = null;
+        if (pubDateStr) {
+            // Intentamos parsear varios formatos
+            let dt = DateTime.fromRFC2822(pubDateStr);
+            if (!dt.isValid) dt = DateTime.fromISO(pubDateStr);
+            if (dt.isValid) pubDate = dt;
+        }
         return {
           id: i + 1,
-          title: item.title,
+          title: String(item.title),
           link: typeof item.link === 'string' ? item.link : item.link?.['@_href'],
           date: pubDate
         };
       })
-      // --- FILTRO DE FECHA: Solo noticias de las últimas 24 horas ---
-      .filter(c => c.link && c.title && c.date >= unDiaAtras);
+      .filter(c => c.link && c.title && c.date && c.date >= dosDiasAtras);
+    
+    console.log(`- Artículos después del filtro de fecha (últimas 48h): ${candidates.length}`);
 
-    if (candidates.length < 4) return '_(No se encontraron suficientes noticias recientes)_';
+    if (candidates.length < 4) {
+      return '_(No se encontraron suficientes noticias relevantes y recientes)_';
+    }
 
     const intereses = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
     
-    const promptSeleccion = `
-      From the following list of recent headlines, pick the 4 most strategically important ones for an executive interested in: ${intereses}.
-      For each of the 4, respond ONLY with its title.
-      
-      Headlines:
-      ${candidates.map(c => `- ${c.title}`).join('\n')}
-    `;
+    const promptSeleccion = `From the following list of recent headlines, pick the 4 most strategically important ones for an executive interested in: ${intereses}. Respond ONLY with the 4 titles, each on a new line. \n\nHeadlines:\n${candidates.map(c => `- ${c.title}`).join('\n')}`;
     const seleccionEnIngles = await askAI(promptSeleccion, 400, 0.5);
+    console.log(`- Títulos seleccionados por la IA: \n${seleccionEnIngles}`);
+    
+    if (seleccionEnIngles.startsWith('[')) throw new Error(`La IA de selección falló: ${seleccionEnIngles}`);
 
-    // --- TRADUCCIÓN CON IA ---
     const promptTraduccion = `
       You are a professional translator for an executive intelligence briefing.
-      Translate the following 4 headlines and their summaries into Spanish.
-      Keep the tone professional and concise. For each, add a link at the end in Markdown format.
+      Translate the following headlines and generate a 1-2 sentence summary in Spanish for each.
+      For each item, add a link at the end in Markdown format: ([Leer más](URL))
 
-      For each of the 4 headlines below, find its corresponding article from the provided list and generate a 1-2 sentence summary.
-      
-      Selected Headlines:
+      Selected Headlines to Summarize and Translate:
       ${seleccionEnIngles}
 
-      Full Article List (for context and summaries):
+      Full Article List for context (Title and Link):
       ${candidates.map(c => `- Title: ${c.title}\n  Link: ${c.link}`).join('\n\n')}
       
       Respond in Spanish. For each item, use the format:
@@ -656,11 +671,11 @@ async function intelGlobal() {
     
     const resultadoFinal = await askAI(promptTraduccion, 800, 0.7);
 
-    cache.set(key, resultadoFinal, 3600); // Cache por 1 hora
+    cache.set(key, resultadoFinal, 3600);
     return resultadoFinal;
 
   } catch (e) {
-    console.error('Error en intelGlobal_v2:', e.message);
+    console.error('Error en intelGlobal_v2.1:', e.message);
     return '_(Error al procesar las noticias)_';
   }
 }
