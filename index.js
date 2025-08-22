@@ -934,7 +934,7 @@ async function briefFull() {
     bigRocks: bigRocks
   });
 
-  return [return [
+return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
     banner('Análisis Estratégico', '🧠'), analisis,
