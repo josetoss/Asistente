@@ -11,7 +11,6 @@ import { google } from 'googleapis';
 import { DateTime } from 'luxon';
 import { XMLParser } from 'fast-xml-parser';
 import ical from 'node-ical';
-import crypto from 'crypto';
 const singleton = fn => {
   let inst;
   return (...args) => inst ?? (inst = fn(...args));
@@ -590,225 +589,98 @@ ${responseGPT}
 
 /* ─── Radar Inteligencia Global (v2: Con Filtro de Fecha y Traducción) ── */
 /* ─── Radar Inteligencia Global (v2.1: Más Robusto) ── */
-
 async function intelGlobal() {
-  const key = 'intelGlobal_v2.6'; // romper caché anterior
+  const key = 'intelGlobal_v2.1';
   if (cache.has(key)) return cache.get(key);
-
+  
   const FEEDS = [
-    'https://warontherocks.com/feed/','https://www.foreignaffairs.com/rss.xml',
-    'https://www.cfr.org/rss.xml','https://carnegieendowment.org/rss/all-publications',
-    'https://www.csis.org/rss/analysis','https://www.rand.org/pubs.rss',
-    'https://www.foreignpolicy.com/feed','https://www.wired.com/feed/rss',
-    'https://feeds.arstechnica.com/arstechnica/index','https://www.theverge.com/rss/index.xml',
-    'http://feeds.feedburner.com/TechCrunch/','https://www.technologyreview.com/feed/',
-    'https://restofworld.org/feed/latest/','https://hbr.org/rss',
+    'https://warontherocks.com/feed/', 'https://www.foreignaffairs.com/rss.xml',
+    'https://www.cfr.org/rss.xml', 'https://carnegieendowment.org/rss/all-publications',
+    'https://www.csis.org/rss/analysis', 'https://www.rand.org/pubs.rss',
+    'https://www.foreignpolicy.com/feed', 'https://www.wired.com/feed/rss',
+    'https://feeds.arstechnica.com/arstechnica/index', 'https://www.theverge.com/rss/index.xml',
+    'http://feeds.feedburner.com/TechCrunch/', 'https://www.technologyreview.com/feed/',
+    'https://restofworld.org/feed/latest/', 'https://hbr.org/rss',
     'https://www.economist.com/rss'
   ];
 
-  // utilidades internas
-  const normalize = (s) => String(s || '').toLowerCase().replace(/\s+/g,' ').trim();
-  const jaccard = (a,b) => {
-    const A = new Set(normalize(a).split(' '));
-    const B = new Set(normalize(b).split(' '));
-    let inter=0; for (const x of A) if (B.has(x)) inter++;
-    return inter / Math.max(1, (A.size + B.size - inter));
-  };
-  const bestMatch = (selected, list) => {
-    let best = null, bestScore = -1;
-    for (const c of list) {
-      const s = jaccard(selected, c.title);
-      if (s > bestScore) { bestScore = s; best = c; }
-    }
-    return best;
-  };
-  const ensureFourLines = (txt) => {
-    const lines = String(txt).split('\n').map(x=>x.trim()).filter(Boolean);
-    return lines.slice(0,4);
-  };
-
   try {
-    const t0 = Date.now();
     console.log('Iniciando intelGlobal...');
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
     const xmls = (await Promise.all(FEEDS.map(url => fetchSafe(url, 5000)))).filter(Boolean);
-
+    
     let articles = [];
     xmls.forEach(xml => {
       const feed = parser.parse(xml);
-      const items = feed?.rss ? feed.rss.channel.item : (feed?.feed ? feed.entry : []);
+      const items = feed.rss ? feed.rss.channel.item : (feed.feed ? feed.entry : []);
       if (items) articles.push(...items);
     });
-
-    // dedupe básica por título normalizado
-    const seen = new Set();
-    articles = articles.filter(it => {
-      const t = normalize(it.title);
-      if (!t || seen.has(t)) return false;
-      seen.add(t); return true;
-    });
-
-    // fechas y recorte por 48h
-    const dosDiasAtras = DateTime.local().minus({ days: 2 }).startOf('day');
-    const candidatesAll = articles.map((item) => {
-      const pubDateStr = item.pubDate || item.published || item.updated || item['dc:date'];
-      let pubDate = null;
-      if (pubDateStr) {
-        let dt = DateTime.fromRFC2822(pubDateStr);
-        if (!dt.isValid) dt = DateTime.fromISO(pubDateStr);
-        if (dt.isValid) pubDate = dt;
-      }
-      return {
-        title: String(item.title || '').slice(0, 200),
-        link: typeof item.link === 'string' ? item.link : item.link?.['@_href'],
-        date: pubDate
-      };
-    }).filter(c => c.link && c.title && c.date && c.date >= dosDiasAtras)
-      .sort((a,b)=> b.date - a.date);
-
-    // limitar candidatos para token efficiency
-    const candidates = candidatesAll.slice(0, 60);
-
     console.log(`- Total de artículos de RSS obtenidos: ${articles.length}`);
-    console.log(`- Artículos después del filtro de fecha (últimas 48h): ${candidates.length}`);
 
-    // Watchdog: si hay <4, expande ventana a 72h para policy
-    if (candidates.length < 4) {
-      const set72 = DateTime.local().minus({ days: 3 }).startOf('day');
-      const candidates72 = articles.map((item) => {
+    // --- FILTRO DE FECHA MEJORADO Y MÁS FLEXIBLE ---
+    const dosDiasAtras = DateTime.local().minus({ days: 2 }).startOf('day');
+
+    const candidates = articles
+      .map((item, i) => {
         const pubDateStr = item.pubDate || item.published || item.updated || item['dc:date'];
         let pubDate = null;
         if (pubDateStr) {
-          let dt = DateTime.fromRFC2822(pubDateStr);
-          if (!dt.isValid) dt = DateTime.fromISO(pubDateStr);
-          if (dt.isValid) pubDate = dt;
+            // Intentamos parsear varios formatos
+            let dt = DateTime.fromRFC2822(pubDateStr);
+            if (!dt.isValid) dt = DateTime.fromISO(pubDateStr);
+            if (dt.isValid) pubDate = dt;
         }
-        const link = typeof item.link === 'string' ? item.link : item.link?.['@_href'];
-        const host = (()=>{ try {
-    const t0 = Date.now(); return new URL(link).hostname.replace('www.',''); } catch(_){ return ''; } })();
-        const klass = FEED_CLASS.get(host) || 'tech';
-        return { 
-          title: String(item.title || '').slice(0,200), 
-          link, 
-          date: pubDate, 
-          klass 
+        return {
+          id: i + 1,
+          title: String(item.title),
+          link: typeof item.link === 'string' ? item.link : item.link?.['@_href'],
+          date: pubDate
         };
-      }).filter(c => c.link && c.title && c.date && ((c.date >= dosDiasAtras) || (c.klass==='policy' && c.date >= set72)))
-        .sort((a,b)=> b.date - a.date);
-      candidates.length = 0; candidates.push(...candidates72.slice(0,60));
-    }
-    if (candidates.length < 4) return '_(No se encontraron suficientes noticias relevantes y recientes)_';
+      })
+      .filter(c => c.link && c.title && c.date && c.date >= dosDiasAtras);
+    
+    console.log(`- Artículos después del filtro de fecha (últimas 48h): ${candidates.length}`);
 
-    const interesesArr = await getIntereses();
-    const intereses = (Array.isArray(interesesArr) && interesesArr.length ? interesesArr.join(', ') : 'geopolítica, tecnología');
-
-    const dayKey = DateTime.local().toISODate();
-    const memoKey = `intelSelected:${dayKey}:${hashCtx({i:intereses})}`;
-    const memoSel = cache.get(memoKey);
-    if (memoSel) {
-      console.log('[intelGlobal] Usando memo diario de titulares.');
-      var selectedLines = memoSel;
-    } else {
-// Prompt de selección ultra estricto
-    const promptSeleccion = `
-Tu tarea es extraer datos. De la siguiente lista de titulares, selecciona los 4 títulos más relevantes estratégicamente para una persona interesada en: ${intereses}.
-
-REGLAS ESTRICTAS:
-- DEBES responder ÚNICAMENTE con los 4 títulos.
-- Cada título DEBE estar en una nueva línea.
-- NO agregues números, viñetas, resúmenes ni explicaciones.
-- Tu respuesta completa deben ser solo los 4 títulos y nada más.
-
-LISTA DE TITULARES PARA ANALIZAR:
-${candidates.map(c => `- ${c.title}`).join('\\n')}
-`.trim();
-
-    let seleccionEnIngles = await withTimeout(askAI(promptSeleccion, 380, 0.2), 8000, 'intel-select');
-    // Post-validación y posible “repair”
-    let selectedLines = ensureFourLines(seleccionEnIngles);
-    if (selectedLines.length !== 4 || selectedLines.some(l => !l || l.startsWith('- ') || /^\d+\./.test(l))) {
-      const repairPrompt = `
-Corrige la lista a EXACTAMENTE cuatro líneas con títulos originales, uno por línea, sin numeración ni viñetas ni explicación adicional:
-${seleccionEnIngles}
-`.trim();
-      const repaired = await withTimeout(askAI(repairPrompt, 200, 0.1), 4000, 'intel-repair');
-      selectedLines = ensureFourLines(repaired);
-    }
-    // Si aún no está bien, fallback a top 4 por fecha
-    if (selectedLines.length !== 4) {
-      selectedLines = candidates.slice(0,4).map(c => c.title);
-    }
-    cache.set(memoKey, selectedLines, 60*60*12);
+    if (candidates.length < 4) {
+      return '_(No se encontraron suficientes noticias relevantes y recientes)_';
     }
 
-    // Mapeo de título seleccionado a URL por similitud
-    const picked = selectedLines.map(sel => {
-      const m = bestMatch(sel, candidates);
-      return { title: sel, url: m?.link || candidates[0].link };
-    });
-
-    // Prompt de traducción+resumen con URLs fijas
-    const itemsBlock = picked.map((p, i) => `#${i+1}\nTitle: ${p.title}\nURL: ${p.url}`).join('\\n\\n');
+    const intereses = (await getIntereses()).join(', ') || 'geopolítica, tecnología';
+    
+    const promptSeleccion = `From the following list of recent headlines, pick the 4 most strategically important ones for an executive interested in: ${intereses}. Respond ONLY with the 4 titles, each on a new line. \n\nHeadlines:\n${candidates.map(c => '- ' + c.title).join('\n')}`;
+    const seleccionEnIngles = await askAI(promptSeleccion, 400, 0.5);
+    console.log(`- Títulos seleccionados por la IA: \n${seleccionEnIngles}`);
+    
+    if (seleccionEnIngles.startsWith('[')) throw new Error(`La IA de selección falló: ${seleccionEnIngles}`);
 
     const promptTraduccion = `
-Eres analista para un informe de inteligencia. Para CADA ítem:
-1) Traduce el título al español.
-2) Resume en español en 140–200 caracteres por qué es importante (una frase fuerte y clara).
-3) Usa EXACTAMENTE la URL provista al final como ([Leer más](URL)).
+      You are a professional translator for an executive intelligence briefing.
+      Translate the following headlines and generate a 1-2 sentence summary in Spanish for each.
+      For each item, add a link at the end in Markdown format: ([Leer más](URL))
 
-Items (usa estos títulos y URLs EXACTAMENTE):
-${itemsBlock}
+      Selected Headlines to Summarize and Translate:
+      ${seleccionEnIngles}
 
-FORMATO EXACTO de salida (repite por cada ítem, sin numeración extra):
-*<Título en Español>*
-<Resumen 140–200 caracteres.> ([Leer más](URL))
-`.trim();
-
-    let resultadoFinal = await withTimeout(askAI(promptTraduccion, 780, 0.5), 10000, 'intel-translate');
-    const dur = Date.now()-t0; const approxTokens = Math.ceil((promptSeleccion.length + promptTraduccion.length)/4);
-    console.log(`[intelGlobal] done in ${dur}ms, ~${approxTokens} toks.`);
-
-    // Validación simple de formato: debe contener 4 bloques con líneas que empiezan con *
-    const blockCount = (String(resultadoFinal).match(/^\*/gm) || []).length;
-    if (blockCount < 4) {
-      const repair2 = `
-Formatea EXACTAMENTE cuatro ítems como sigue y no agregues nada más:
-*<Título en Español>*
-<Resumen 140–200 caracteres.> ([Leer más](URL))
-
-Mantén los mismos títulos y URLs que te di.
-${resultadoFinal}
-`.trim();
-      resultadoFinal = await withTimeout(askAI(repair2, 400, 0.2), 6000, 'intel-format-fix');
-    }
+      Full Article List for context (Title and Link):
+      ${candidates.map(c => '- Title: ' + c.title + '\n  Link: ' + c.link).join('\n\n')}
+      
+      Respond in Spanish. For each item, use the format:
+      *<Título en Español>*
+      <Resumen en Español> ([Leer más](URL))
+    `;
+    
+    const resultadoFinal = await askAI(promptTraduccion, 800, 0.7);
 
     cache.set(key, resultadoFinal, 3600);
     return resultadoFinal;
 
   } catch (e) {
-    console.error('Error en intelGlobal_v2.5:', e.message);
+    console.error('Error en intelGlobal_v2.1:', e.message);
     return '_(Error al procesar las noticias)_';
   }
 }
 
-  const FEED_CLASS = new Map([
-    ['warontherocks.com', 'policy'],
-    ['foreignaffairs.com', 'policy'],
-    ['cfr.org', 'policy'],
-    ['carnegieendowment.org', 'policy'],
-    ['csis.org', 'policy'],
-    ['rand.org', 'policy'],
-    ['foreignpolicy.com', 'policy'],
-    ['wired.com', 'tech'],
-    ['arstechnica.com', 'tech'],
-    ['theverge.com', 'tech'],
-    ['techcrunch.com', 'tech'],
-    ['technologyreview.com', 'tech'],
-    ['restofworld.org', 'tech'],
-    ['hbr.org', 'policy'],
-    ['economist.com', 'policy'],
-  ]);
-
+/* ─── Horóscopo Supremo (Enfoque Diario y Múltiples Fuentes) ─── */
 async function getHoroscopo() {
   const key = 'horoscopo_diario';
   if (cache.has(key)) return cache.get(key);
@@ -920,7 +792,7 @@ async function bonusTrack() {
       [Leer más](<URL_DEL_ARTÍCULO>)
 
       Artículos candidatos:
-      ${candidates.slice(0, 20).map(c => `- Título: ${c.title}\n  URL: ${c.link}`).join('\n\n')}
+      ${candidates.slice(0, 20).map(c => '- Título: ' + c.title + '\n  URL: ' + c.link).join('\n\n')}
     `;
     
     const finalBonus = await askAI(prompt, 200, 0.7);
@@ -960,32 +832,6 @@ async function briefShort() {
     agendaUnificada.length > 0 ? agendaUnificada.join('\n') : '_(Sin eventos)_'
   ].join('\n\n');
 }
-
-async function getGlobalSentiment(selectedTitles = []) {
-  try {
-    if (!selectedTitles || selectedTitles.length < 1) return '';
-    const prompt = `Clasifica el tono general de estas 4 noticias en una frase breve (máx 120 caracteres). Usa términos como: alerta geopolítica / optimismo tecnológico / incertidumbre macro / avance regulatorio, etc. Devuelve SOLO la frase.
-Titulares:
-${selectedTitles.map(t=>`- ${t}`).join('\n')}`.trim(); // <-- CORRECCIÓN 1
-
-    const out = await withTimeout(askAI(prompt, 120, 0.2), 4000, 'sentiment');
-    
-    // Corregido también aquí
-    return String(out).split('\n')[0].slice(0, 120); // <-- CORRECCIÓN 2
-
-  } catch (e) {
-    console.warn('getGlobalSentiment fail:', e.message);
-    return '';
-  }
-}
-function buildAdvisor({ crisis=false, weekendMode=false, topPen=[], topBR=[] }) {
-  if (crisis) return '⚠️ Advisor: desbloquea un pendiente 🔴 antes del mediodía.';
-  if (weekendMode) return '🧭 Advisor: dedica 30′ al Big Rock y reflexión semanal.';
-  const firstRed = (topPen||[]).find(x => x && x.startsWith('🔴'));
-  if (firstRed) return '🧯 Advisor: cierra 1 rojo y luego aborda impacto alto.';
-  return '🎯 Advisor: prioriza impacto sobre urgencia; evita tareas menores.';
-}
-
 async function briefFull() {
   // await addWorkAgendaToPersonalCalendar(); // <-- Confirmamos que esta línea está inactiva
   
@@ -998,28 +844,6 @@ async function briefFull() {
     getHoroscopo(), 
     bonusTrack()
   ]);
-
-  // Señales derivadas para Sentimiento y Advisor
-  const profesionalEvents = agendaData.profesional || [];
-  const personalEvents = agendaData.personal || [];
-
-  // Extraer títulos del bloque intel (líneas que empiezan con *)
-  const selectedTitles = String(intel).split('
-')
-    .filter(l => l.trim().startsWith('*'))
-    .map(l => l.replace(/^\*(.*)\*$/, '$1').trim())
-    .slice(0,4);
-
-  // Señales para modos
-  const redCount = (pendientesList||[]).filter(x => x.startsWith('🔴')).length;
-  const weekday = DateTime.local().setZone('America/Santiago').weekday; // 1..7
-
-  const crisis = redCount >= 2;
-  const weekendMode = (weekday === 5) || (weekday === 6) || (weekday === 7);
-
-  const globalSent = await getGlobalSentiment(selectedTitles);
-  const advisorLine = buildAdvisor({ crisis, weekendMode, topPen: pendientesList, topBR: bigRocks });
-
 
   // --- Lógica para formatear la agenda en subsecciones ---
   let agendaFormatted = '';
@@ -1064,8 +888,6 @@ async function briefFull() {
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
     banner('Análisis Estratégico', '🧠'), analisis,
-    (globalSent ? banner('Sentimiento Global', '🛰️') + '\n' + globalSent : ''),
-    banner('Advisor', '🧭'), advisorLine,
     banner('Clima', '🌦️'), clima,
     banner('Agenda', '📅'), agendaFormatted, // Usamos nuestra nueva variable formateada
     banner('Pendientes Críticos', '🔥'), pendientesList.length > 0 ? pendientesList.join('\n') : '_(Sin pendientes activos)_',
@@ -1172,106 +994,3 @@ app.listen(PORT, ()=> console.log(`🚀 Joya Ultimate escuchando en puerto ${POR
  * @param {string} userQuery El texto parcial que el usuario proveyó (ej. 'tratado').
  * @returns {Promise<string>} Un mensaje de confirmación o error.
  */
-
-
-
-// === Utilidades de análisis estratégico eficientes ===
-function uniqTrim(list){if(!Array.isArray(list))return[];const seen=new Set();const out=[];for(const s of list){const v=String(s||'').trim();if(!v)continue;if(!seen.has(v)){seen.add(v);out.push(v);}}return out;}
-function pickTopPendientes(pendientes,maxItems=5,maxLen=90){const safe=uniqTrim(pendientes);const reds=safe.filter(x=>x.startsWith('🔴'));const rest=safe.filter(x=>!x.startsWith('🔴'));return reds.concat(rest).slice(0,maxItems).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
-function pickTopEventos(eventos,maxItems=6,maxLen=80){return uniqTrim(eventos).slice(0,maxItems).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
-function pickTopRocks(rocks,maxItems=3,maxLen=80){return uniqTrim(rocks).slice(0,maxItems).map(x=>x.replace(/^•\s*/,'').trim()).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
-function hashCtx(obj){const h=crypto.createHash('sha256');h.update(JSON.stringify(obj));return h.digest('hex').slice(0,16);}
-
-async function getStrategicAnalysis({ agendaProfesional = [], agendaPersonal = [], pendientes = [], bigRocks = [] }) {
-  const TZ = 'America/Santiago';
-  const now = DateTime.local().setZone(TZ);
-  const day = now.toISODate();
-  const weekday = now.weekday; // 1=Mon ... 7=Sun
-
-  // --- señales compactas ---
-  const topPro = pickTopEventos(agendaProfesional, 5, 80);
-  const topPer = pickTopEventos(agendaPersonal, 3, 80);
-  const topPen = pickTopPendientes(pendientes, 5, 90);
-  const topBR  = pickTopRocks(bigRocks, 2, 80);
-
-  // MODOS automáticos
-  const redCount = topPen.filter(x => x.startsWith('🔴')).length;
-  const crisis = redCount >= 2;
-  const weekendMode = (weekday === 5) || (weekday === 6) || (weekday === 7); // viernes/sábado/domingo
-
-  // Si todo está vacío, evita IA
-  if (!topPro.length && !topPer.length && !topPen.length && !topBR.length) {
-    return [
-      '1. **Foco Principal:** Preparación base',
-      '2. **Riesgo a Mitigar:** Falta de prioridades',
-      '3. **Acción Clave:** Definir 3 tareas críticas',
-      '4. **Métrica de Éxito:** 3 tareas cerradas'
-    ].join('\\n');
-  }
-
-  // Cache por contenido+modo
-  const compactCtx = { day, topPro, topPer, topPen, topBR, crisis, weekendMode };
-  const cacheKey = `strategic_analysis_v2:${hashCtx(compactCtx)}`;
-  if (cache.has(cacheKey)) return cache.get(cacheKey);
-
-  // Prompt compacto con estilo según modo
-  const tone = crisis
-    ? 'Tono directo y operacional, enfoque en desbloquear bloqueos hoy.'
-    : (weekendMode ? 'Tono reflexivo y de alto nivel, prioriza enfoque y aprendizaje.' : 'Tono ejecutivo, claro y preciso.');
-
-  const prompt = `
-Actúa como "Jefe de Gabinete". Entrega 4 bullets accionables, **máximo 55 caracteres** cada uno, con el formato EXACTO:
-1. **Foco Principal:** ...
-2. **Riesgo a Mitigar:** ...
-3. **Acción Clave:** ...
-4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
-
-Contexto ultra-compacto (usa solo señales relevantes):
-Modo: ${crisis ? 'CRISIS' : (weekendMode ? 'FIN_DE_SEMANA' : 'NORMAL')} — ${tone}
-
-Agenda Profesional:
-${topPro.map(x => `- ${x}`).join('\\n') || '—'}
-
-Agenda Personal:
-${topPer.map(x => `- ${x}`).join('\\n') || '—'}
-
-Pendientes Críticos:
-${topPen.map(x => `- ${x}`).join('\\n') || '—'}
-
-Big Rocks:
-${topBR.map(x => `- ${x}`).join('\\n') || '—'}
-`.trim();
-
-  // Llamada IA con timeout y control de tokens
-  let analisis;
-  try {
-    analisis = await withTimeout(askAI(prompt, 260, 0.3), 8000, 'Strategic');
-  } catch (e) {
-    console.error('Strategic analysis timeout/fail:', e.message);
-    analisis = [
-      `1. **Foco Principal:** ${topBR[0] || topPen[0] || topPro[0] || 'Priorizar 1 objetivo'}`.slice(0, 55),
-      `2. **Riesgo a Mitigar:** Bloqueos y atrasos`.slice(0, 55),
-      `3. **Acción Clave:** Cerrar 1 tarea roja hoy`.slice(0, 55),
-      `4. **Métrica de Éxito:** "1 cierre crítico logrado"`.slice(0, 55)
-    ].join('\\n');
-  }
-
-  // Post-procesado: asegurar 4 líneas y límites
-  const lines = String(analisis).split('\\n').map(x => x.trim()).filter(Boolean);
-  const heads = [
-    '1. **Foco Principal:**',
-    '2. **Riesgo a Mitigar:**',
-    '3. **Acción Clave:**',
-    '4. **Métrica de Éxito:**'
-  ];
-  const trimmed = heads.map((h, i) => {
-    const found = lines.find(l => l.startsWith(`${i+1}. **`)) || (lines[i] || '');
-    const body = found.replace(/^\\d+\\.\\s*\\*\\*.*?\\*\\*:\\s*/,'').slice(0, 55);
-    return `${h} ${body}`.slice(0, 55);
-  });
-
-  const finalOut = trimmed.join('\\n');
-  cache.set(cacheKey, finalOut, 900); // 15 min
-  return finalOut;
-}
-
