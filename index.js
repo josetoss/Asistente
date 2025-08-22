@@ -966,17 +966,18 @@ async function getGlobalSentiment(selectedTitles = []) {
     if (!selectedTitles || selectedTitles.length < 1) return '';
     const prompt = `Clasifica el tono general de estas 4 noticias en una frase breve (máx 120 caracteres). Usa términos como: alerta geopolítica / optimismo tecnológico / incertidumbre macro / avance regulatorio, etc. Devuelve SOLO la frase.
 Titulares:
-${selectedTitles.map(t=>`- ${t}`).join('
-')}`.trim();
+${selectedTitles.map(t=>`- ${t}`).join('\n')}`.trim(); // <-- CORRECCIÓN 1
+
     const out = await withTimeout(askAI(prompt, 120, 0.2), 4000, 'sentiment');
-    return String(out).split('
-')[0].slice(0, 120);
+    
+    // Corregido también aquí
+    return String(out).split('\n')[0].slice(0, 120); // <-- CORRECCIÓN 2
+
   } catch (e) {
     console.warn('getGlobalSentiment fail:', e.message);
     return '';
   }
 }
-
 function buildAdvisor({ crisis=false, weekendMode=false, topPen=[], topBR=[] }) {
   if (crisis) return '⚠️ Advisor: desbloquea un pendiente 🔴 antes del mediodía.';
   if (weekendMode) return '🧭 Advisor: dedica 30′ al Big Rock y reflexión semanal.';
