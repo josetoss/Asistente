@@ -697,7 +697,7 @@ async function intelGlobal() {
         .sort((a,b)=> b.date - a.date);
       candidates.length = 0; candidates.push(...candidates72.slice(0,60));
     }
-    if (candidates.length < 4) return '_(No se encontraron suficientes noticias relevantes y recientes)_';No se encontraron suficientes noticias relevantes y recientes)_';
+    if (candidates.length < 4) return '_(No se encontraron suficientes noticias relevantes y recientes)_';
 
     const interesesArr = await getIntereses();
     const intereses = (Array.isArray(interesesArr) && interesesArr.length ? interesesArr.join(', ') : 'geopolítica, tecnología');
