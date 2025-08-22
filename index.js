@@ -9,6 +9,7 @@ import NodeCache from 'node-cache';
 import fetchPkg from 'node-fetch';
 import { google } from 'googleapis';
 import { DateTime } from 'luxon';
+import crypto from 'crypto';
 import { XMLParser } from 'fast-xml-parser';
 import ical from 'node-ical';
 const singleton = fn => {
@@ -298,78 +299,91 @@ async function getIntereses() {
 }
 
 async function getPendientes() {
-  const key = 'pendientes';
-  // 1. La caché ahora funciona correctamente: primero busca el dato guardado.
-  if (cache.has(key)) {
-    console.log('Usando pendientes desde la caché.');
-    return cache.get(key);
-  }
-
-  console.log('Iniciando getPendientes (leyendo desde Google Sheets)...');
-
+  const CONFIG = {
+    MAX_ITEMS: 7,
+    SCORE: {
+      BASE_IMPACT_MULTIPLIER: 2,
+      OVERDUE_PENALTY: 1000,
+      DAYS_OVERDUE_MULTIPLIER: 10,
+      DUE_TODAY_BONUS: 500,
+      DUE_IN_X_DAYS_BONUS: 100,
+    },
+    TZ: 'America/Santiago',
+    CACHE_TTL_SEC: 300,
+    COLS: { proyecto: 0, tarea: 1, vence: 2, estado: 4, impacto: 5, urgencia: 6 },
+    AUTO_DETECT_HEADER: true,
+  };
+  const key = `pendientes_ultimate_v2:max${CONFIG.MAX_ITEMS}`;
+  if (typeof cache?.has === 'function' && cache.has(key)) return cache.get(key);
+  console.log('[getPendientes] Iniciando (v2 eficiente)…');
+  const DEFAULT_FORMATS = ['M/d/yyyy','d/M/yyyy','yyyy-MM-dd','dd-MM-yyyy','dd/MM/yyyy'];
+  const INACTIVOS = new Set(['done','discarded','waiting']);
+  const normalizeEstado = (raw) => {
+    const s = (raw || '').toLowerCase().trim();
+    if (!s) return 'unknown';
+    if (['done','completado','completada','cerrado','cerrada','hecho','finalizado'].includes(s)) return 'done';
+    if (['discarded','descartado','descartada','cancelado','cancelada'].includes(s)) return 'discarded';
+    if (['waiting','en espera','postergado','postergada','blocked','bloqueado','bloqueada'].includes(s)) return 'waiting';
+    if (['in progress','en progreso','doing','activo','activa'].includes(s)) return 'in_progress';
+    return s;
+  };
+  const parseSmartDate = (str, zone) => {
+    if (!str) return null;
+    let dt = DateTime.fromISO(str, { zone });
+    if (dt.isValid) return dt.startOf('day');
+    for (let i=0;i<DEFAULT_FORMATS.length;i++){ dt = DateTime.fromFormat(String(str).trim(), DEFAULT_FORMATS[i], { zone }); if (dt.isValid) return dt.startOf('day'); }
+    const jsd = new Date(str); if (!Number.isNaN(jsd.getTime())) { return DateTime.fromJSDate(jsd, { zone }).startOf('day'); }
+    return null;
+  };
+  const toNum = (v, fb=2) => { const n = Number(v); return Number.isFinite(n) ? n : fb; };
+  const today = DateTime.local({ zone: CONFIG.TZ }).startOf('day');
+  const { BASE_IMPACT_MULTIPLIER, OVERDUE_PENALTY, DAYS_OVERDUE_MULTIPLIER, DUE_TODAY_BONUS, DUE_IN_X_DAYS_BONUS } = CONFIG.SCORE;
   try {
     const gs = await sheetsClient();
-    const res = await gs.spreadsheets.values.get({
-      spreadsheetId: DASHBOARD_SPREADSHEET_ID,
-      // 2. Usamos la constante para mayor seguridad y fácil mantenimiento.
-      range: SHEET_RANGES.PENDIENTES 
-    });
-
-    const rows = res.data.values || [];
-    console.log(`- Filas obtenidas de Google Sheets: ${rows.length}`);
-    if (rows.length === 0) return [];
-
-    const today = DateTime.local().startOf('day');
-
-    const pendientesProcesados = rows.map((r, index) => {
-      const estado = (r[4] || '').toLowerCase().trim();
-      return {
-        tarea: r[1] || `(Tarea sin descripción en fila ${index + 2})`,
-        vence: r[2] ? DateTime.fromISO(new Date(r[2]).toISOString()) : null,
-        estado: estado,
-        score: (Number(r[5]) || 2) * 2 + (Number(r[6]) || 2)
-      };
-    });
-
-    const pendientesFiltrados = pendientesProcesados.filter(p => 
-      !['done', 'discarded', 'waiting'].includes(p.estado)
-    );
-    console.log(`- Filas después de filtrar por estado: ${pendientesFiltrados.length}`);
-
-    if (pendientesFiltrados.length === 0) {
-      return []; // No hay pendientes activos, devolvemos una lista vacía.
+    const res = await gs.spreadsheets.values.get({ spreadsheetId: DASHBOARD_SPREADSHEET_ID, range: SHEET_RANGES.PENDIENTES });
+    const rows = res?.data?.values || []; if (rows.length === 0) return [];
+    let startIdx = 0;
+    if (CONFIG.AUTO_DETECT_HEADER && rows[0]) {
+      const first = rows[0].map(x => (x || '').toLowerCase());
+      const looksHeader = first.some(c => c.includes('tarea')||c.includes('pendiente')) ||
+                          first.some(c => c.includes('vence')||c.includes('fecha')) ||
+                          first.some(c => c.includes('estado')) ||
+                          first.some(c => c.includes('impacto')) ||
+                          first.some(c => c.includes('urgencia'));
+      if (looksHeader) startIdx = 1;
     }
-
-    const listaFinal = pendientesFiltrados
-      .map(p => ({
-        ...p,
-        atras: p.vence && p.vence.isValid && p.vence < today
-      }))
-      .sort((a, b) => (b.atras - a.atras) || (b.score - a.score))
-      .slice(0, 5)
-      .map(p => {
-        const fecha = p.vence && p.vence.isValid ? ` (${p.vence.toFormat('dd-MMM')})` : '';
-        return `${p.atras ? '🔴' : '•'} ${p.tarea}${fecha}`;
-      });
-
-    console.log(`- Lista final de pendientes para mostrar: ${listaFinal.length}`);
-    
-    // 3. Guardamos en caché solo si el resultado es bueno.
-    if (listaFinal.length > 0) {
-      cache.set(key, listaFinal, 120); // Cache por 2 minutos
+    const todayMs = today.toMillis();
+    const items = [];
+    for (let i=startIdx;i<rows.length;i++){
+      const r = rows[i] || [];
+      const proyecto = r[CONFIG.COLS.proyecto] || 'General';
+      const tarea = r[CONFIG.COLS.tarea] ? String(r[CONFIG.COLS.tarea]).trim() : `(Tarea sin descripción en fila ${i + 1})`;
+      const vence = parseSmartDate(r[CONFIG.COLS.vence], CONFIG.TZ);
+      const estado = normalizeEstado(r[CONFIG.COLS.estado]);
+      const impacto = toNum(r[CONFIG.COLS.impacto],2);
+      const urgencia = toNum(r[CONFIG.COLS.urgencia],2);
+      if (INACTIVOS.has(estado)) continue;
+      const baseScore = impacto * BASE_IMPACT_MULTIPLIER + urgencia;
+      let dynamicScore = baseScore, timeLabel = '', icon = '•';
+      if (vence && vence.isValid) {
+        const diff = vence.diff(today, 'days').days;
+        if (diff < 0) { const d = Math.abs(Math.floor(diff)); dynamicScore += OVERDUE_PENALTY + d * DAYS_OVERDUE_MULTIPLIER; timeLabel = `(Venció hace ${d} ${d===1?'día':'días'})`; icon='🔴'; }
+        else if (diff < 1) { dynamicScore += DUE_TODAY_BONUS; timeLabel = `(Vence Hoy)`; icon='🟠'; }
+        else { const d = Math.ceil(diff); dynamicScore += DUE_IN_X_DAYS_BONUS / d; timeLabel = `(en ${d}d)`; icon='🔵'; }
+      }
+      const textoFinal = (proyecto && proyecto !== 'General') ? `${icon} *[${proyecto}]* ${tarea} ${timeLabel}`.trim()
+                                                              : `${icon} ${tarea} ${timeLabel}`.trim();
+      items.push({ textoFinal, dynamicScore, hasDate: !!(vence && vence.isValid), absDelta: (vence&&vence.isValid)? Math.abs(vence.toMillis() - todayMs) : Number.POSITIVE_INFINITY });
     }
-
-     return listaFinal;
-
-  } catch (e) {
-    console.error('Error CRÍTICO en getPendientes:', e.message);
-    return [`❌ Error en Pendientes: ${e.message}`];
-  }
+    if (items.length===0) return [];
+    items.sort((a,b)=>{ if (b.dynamicScore!==a.dynamicScore) return b.dynamicScore-a.dynamicScore; if (a.hasDate!==b.hasDate) return (b.hasDate?1:0)-(a.hasDate?1:0); return a.absDelta-b.absDelta; });
+    const listaFinal = items.slice(0, CONFIG.MAX_ITEMS).map(p=>p.textoFinal);
+    if (listaFinal.length && typeof cache?.set==='function') cache.set(key, listaFinal, CONFIG.CACHE_TTL_SEC);
+    return listaFinal;
+  } catch(e){ console.error('[getPendientes] ERROR crítico:', e?.message, e?.stack); return [`❌ Error en Pendientes: ${e?.message||'desconocido'}`]; }
 }
 
-//======================================================================
-// FUNCIÓN PARA LEER LOS NUEVOS INTERESES DEL BONUS TRACK
-//======================================================================
+
 async function getInteresesBonus() {
   const key = 'interesesBonus';
   if (cache.has(key)) return cache.get(key);
@@ -832,6 +846,54 @@ async function briefShort() {
     agendaUnificada.length > 0 ? agendaUnificada.join('\n') : '_(Sin eventos)_'
   ].join('\n\n');
 }
+
+// === Utilidades de análisis estratégico eficientes ===
+function uniqTrim(list){if(!Array.isArray(list))return[];const seen=new Set();const out=[];for(const s of list){const v=String(s||'').trim();if(!v)continue;if(!seen.has(v)){seen.add(v);out.push(v);}}return out;}
+function pickTopPendientes(pendientes,maxItems=5,maxLen=90){const safe=uniqTrim(pendientes);const reds=safe.filter(x=>x.startsWith('🔴'));const rest=safe.filter(x=>!x.startsWith('🔴'));return reds.concat(rest).slice(0,maxItems).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
+function pickTopEventos(eventos,maxItems=6,maxLen=80){return uniqTrim(eventos).slice(0,maxItems).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
+function pickTopRocks(rocks,maxItems=3,maxLen=80){return uniqTrim(rocks).slice(0,maxItems).map(x=>x.replace(/^•\s*/,'').trim()).map(x=>x.length>maxLen?x.slice(0,maxLen-1)+'…':x);}
+function hashCtx(obj){const h=crypto.createHash('sha256');h.update(JSON.stringify(obj));return h.digest('hex').slice(0,16);}
+async function getStrategicAnalysis({agendaProfesional=[],agendaPersonal=[],pendientes=[],bigRocks=[]}){
+  const day=DateTime.local().setZone('America/Santiago').toISODate();
+  const topPro=pickTopEventos(agendaProfesional,5,80);
+  const topPer=pickTopEventos(agendaPersonal,3,80);
+  const topPen=pickTopPendientes(pendientes,5,90);
+  const topBR=pickTopRocks(bigRocks,2,80);
+  if(!topPro.length && !topPer.length && !topPen.length && !topBR.length){
+    return ['1. **Foco Principal:** Preparación base','2. **Riesgo a Mitigar:** Falta de prioridades','3. **Acción Clave:** Definir 3 tareas críticas','4. **Métrica de Éxito:** 3 tareas cerradas'].join('\n');
+  }
+  const compactCtx={day,topPro,topPer,topPen,topBR};
+  const cacheKey=`strategic_analysis:${hashCtx(compactCtx)}`;
+  if(cache.has(cacheKey)) return cache.get(cacheKey);
+  const prompt=`Actúa como "Jefe de Gabinete" y entrega 4 bullets accionables.
+Cada bullet DEBE tener MÁXIMO 55 caracteres (contando espacios).
+Formato EXACTO:
+1. **Foco Principal:** ...
+2. **Riesgo a Mitigar:** ...
+3. **Acción Clave:** ...
+4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
+
+Contexto ultra-compacto (NO reescribas completo, solo usa señales):
+Agenda Profesional:
+${topPro.map(x=>`- ${x}`).join('\n')||'—'}
+
+Agenda Personal:
+${topPer.map(x=>`- ${x}`).join('\n')||'—'}
+
+Pendientes Críticos:
+${topPen.map(x=>`- ${x}`).join('\n')||'—'}
+
+Big Rocks:
+${topBR.map(x=>`- ${x}`).join('\n')||'—'}`.trim();
+  let analisis;
+  try{ analisis=await withTimeout(askAI(prompt,260,0.3),8000,'Strategic'); }
+  catch(e){ console.error('Strategic analysis timeout/fail:', e.message);
+    analisis=[`1. **Foco Principal:** ${topBR[0]||topPen[0]||topPro[0]||'Priorizar 1 objetivo'}`.slice(0,55),`2. **Riesgo a Mitigar:** Bloqueos y atrasos`.slice(0,55),`3. **Acción Clave:** Cerrar 1 tarea roja hoy`.slice(0,55),`4. **Métrica de Éxito:** "1 cierre crítico logrado"`.slice(0,55)].join('\n');
+  }
+  const lines=String(analisis).split('\n').filter(Boolean);
+  const trimmed=lines.slice(0,8).map(s=>s.length>55?s.slice(0,55):s).map((s,i)=>{const heads=['1. **Foco Principal:**','2. **Riesgo a Mitigar:**','3. **Acción Clave:**','4. **Métrica de Éxito:**'];if(i<4 && !s.startsWith(`${i+1}. **`)){return `${heads[i]} ${s.replace(/^\d+\.\s*\*\*.*?\*\*:\s*/,'')}`.slice(0,55);}return s;}).slice(0,4);
+  const finalOut=trimmed.join('\n'); cache.set(cacheKey,finalOut,600); return finalOut;
+}
 async function briefFull() {
   // await addWorkAgendaToPersonalCalendar(); // <-- Confirmamos que esta línea está inactiva
   
@@ -865,26 +927,14 @@ async function briefFull() {
   }
   // ---------------------------------------------------
 
-  const promptCoach = `
-    ⚔️ Actúa como mi "Jefe de Gabinete" y coach estratégico personal.
-    Tu respuesta en 4 puntos, cada uno de no más de 55 caracteres.
-    1. **Foco Principal:** ...
-    2. **Riesgo a Mitigar:** ...
-    3. **Acción Clave:** ...
-    4. **Métrica de Éxito:** "El éxito hoy se medirá por: ..."
-    ---
-    Agenda Profesional:
-    ${profesionalEvents.join('\n') || '—'}
-    Agenda Personal:
-    ${personalEvents.join('\n') || '—'}
-    Pendientes:
-    ${pendientesList.join('\n') || '—'}
-    Big Rock:
-    ${bigRocks.join('\n') || '—'}
-  `;
-  const analisis = await askAI(promptCoach, 350, 0.7);
+  const analisis = await getStrategicAnalysis({
+    agendaProfesional: profesionalEvents,
+    agendaPersonal: personalEvents,
+    pendientes: pendientesList,
+    bigRocks: bigRocks
+  });
 
-  return [
+  return [return [
     '🗞️ *MORNING BRIEF JOYA ULTIMATE*',
     `> _${DateTime.local().setZone('America/Santiago').toFormat("cccc d 'de' LLLL yyyy")}_`,
     banner('Análisis Estratégico', '🧠'), analisis,
